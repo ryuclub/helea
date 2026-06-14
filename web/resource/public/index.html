@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<title>天之炼狱 资源查看器 (P3)</title>
+<style>
+  body { margin: 0; background: #1a1a1f; color: #ddd; font-family: system-ui, sans-serif; }
+  header { padding: 12px 16px; border-bottom: 1px solid #333; }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .row { display: flex; gap: 32px; padding: 20px; flex-wrap: wrap; }
+  .card { background: #222; border: 1px solid #333; border-radius: 8px; padding: 16px; }
+  .card h2 { font-size: 13px; margin: 0 0 10px; color: #9af; font-weight: 600; }
+  canvas { image-rendering: pixelated; background:
+    repeating-conic-gradient(#3a3a40 0% 25%, #2c2c31 0% 50%) 50% / 24px 24px; border-radius: 4px; }
+  .meta { font-size: 12px; color: #888; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header><h1>天之炼狱 (DarkEden) 资源查看器 — 浏览器原生解析 · P3</h1></header>
+<div class="row">
+  <div class="card">
+    <h2>角色动画 · CIndexSprite (.ispk)</h2>
+    <canvas id="charCanvas" width="240" height="280"></canvas>
+    <div class="meta" id="charMeta">加载中…</div>
+  </div>
+  <div class="card">
+    <h2>三族徽记 · CSprite (.spk)</h2>
+    <canvas id="markCanvas" width="320" height="120"></canvas>
+    <div class="meta" id="markMeta">加载中…</div>
+  </div>
+</div>
+
+<script type="module">
+import { decodePack, decodeCIndexSprite, decodeAllCSprites } from "../src/spk.js";
+
+async function fetchBuf(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url}: ${r.status}`);
+  return new Uint8Array(await r.arrayBuffer());
+}
+
+function blit(ctx, sprite, dx, dy) {
+  if (!sprite.width || !sprite.height) return;
+  const img = new ImageData(new Uint8ClampedArray(sprite.rgba), sprite.width, sprite.height);
+  ctx.putImageData(img, dx, dy);
+}
+
+// 角色：解码前 12 帧(3 朝向×4)，循环播放当前朝向的 4 帧
+(async () => {
+  const meta = document.getElementById("charMeta");
+  try {
+    const buf = await fetchBuf("assets/slayerman00.ispk");
+    const frames = decodePack(buf, decodeCIndexSprite, 12);
+    const cv = document.getElementById("charCanvas");
+    const ctx = cv.getContext("2d");
+    meta.textContent = `${frames.length} 帧 · 首帧 ${frames[0].width}×${frames[0].height}`;
+    let dir = 0, f = 0;
+    setInterval(() => {
+      const idx = dir * 4 + f;
+      const s = frames[idx] || frames[0];
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      blit(ctx, s, (cv.width - s.width) >> 1, (cv.height - s.height) >> 1);
+      f = (f + 1) % 4;
+      if (f === 0) dir = (dir + 1) % 3;
+    }, 180);
+  } catch (e) { meta.textContent = "错误: " + e.message; }
+})();
+
+// 徽记：解码 3 个 CSprite 横排
+(async () => {
+  const meta = document.getElementById("markMeta");
+  try {
+    const [spk, spki] = await Promise.all([fetchBuf("assets/originmark.spk"), fetchBuf("assets/originmark.spki")]);
+    const sprites = decodeAllCSprites(spk, spki);
+    const cv = document.getElementById("markCanvas");
+    const ctx = cv.getContext("2d");
+    const scale = 4;
+    sprites.forEach((s, i) => {
+      const tmp = document.createElement("canvas");
+      tmp.width = s.width; tmp.height = s.height;
+      tmp.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(s.rgba), s.width, s.height), 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tmp, 20 + i * 100, 20, s.width * scale, s.height * scale);
+    });
+    meta.textContent = `${sprites.length} 个徽记 · 各 ${sprites[0].width}×${sprites[0].height}`;
+  } catch (e) { meta.textContent = "错误: " + e.message; }
+})();
+</script>
+</body>
+</html>

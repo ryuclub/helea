@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<title>天之炼狱 Web 客户端 · Babylon 引擎</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0c0c10; color: #ddd; font-family: system-ui, sans-serif; }
+  body { display: flex; }
+  #game { flex: 1; position: relative; }
+  #cv { width: 100%; height: 100vh; display: block; outline: none; }
+  #title { position: absolute; left: 14px; top: 12px; font-size: 14px; color: #cde;
+           background: rgba(0,0,0,.4); padding: 6px 10px; border-radius: 6px; }
+  #side { width: 320px; padding: 16px; overflow-y: auto; border-left: 1px solid #1c1c22; }
+  h1 { font-size: 15px; margin: 0 0 4px; } .sub { font-size: 12px; color: #888; margin-bottom: 12px; }
+  button { background: #2b6; color: #021; border: 0; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #444; color: #888; cursor: default; }
+  #stat { margin: 12px 0; font-size: 12px; color: #9af; }
+  #log { font: 12px/1.6 ui-monospace, monospace; }
+  .l { padding: 2px 0; border-bottom: 1px solid #18181e; }
+  .ok { color: #6e6; } .err { color: #e66; } .info { color: #9bf; }
+</style>
+</head>
+<body>
+<div id="game"><canvas id="cv"></canvas><div id="title">天之炼狱 · Babylon 引擎底座</div></div>
+<div id="side">
+  <h1>天之炼狱 (DarkEden) · Web 客户端</h1>
+  <div class="sub">Babylon 正式引擎 + 真实登录流</div>
+  <button id="go">连接并登录 (111111)</button>
+  <div id="stat"></div>
+  <div id="log"></div>
+</div>
+
+<script src="/public/vendor/babylon.js"></script>
+<script type="module">
+import { GameRenderer } from "../src/render.js";
+import { decodePack, decodeCIndexSprite } from "../src/spk.js";
+import { encCLLogin, encCLGetPCList, encCLSelectPC, encCGConnect, decode, Framer } from "../src/proto.js";
+
+const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
+const log = (m, c = "") => { const d = document.createElement("div"); d.className = "l " + c; d.textContent = m; logEl.prepend(d); };
+
+// 账号 111111 Slayer SLOT1 角色名(DB 原始字节)
+const PC_NAME = Uint8Array.from("B2BBD4D9D1DACACE".match(/../g).map((h) => parseInt(h, 16)));
+
+// ---- 引擎底座 ----
+const renderer = new GameRenderer(document.getElementById("cv")).buildScene().addGround(6, 6).start();
+window.__renderer = renderer;
+
+// 预解码角色帧(P3)
+let heroFrames = null;
+(async () => {
+  try {
+    const buf = new Uint8Array(await (await fetch("/public/assets/slayerman00.ispk")).arrayBuffer());
+    heroFrames = decodePack(buf, decodeCIndexSprite, 12);
+    log(`角色资源就绪: ${heroFrames.length} 帧`, "info");
+  } catch (e) { log("角色资源失败: " + e.message, "err"); }
+})();
+
+let player = null;
+function spawnPlayer() {
+  if (player || !heroFrames) return;
+  player = renderer.spawn({ id: "player", col: 2, row: 3 }).setBillboard(heroFrames, { dirCount: 3, framesPerDir: 4 });
+  window.__player = player;
+  log("角色已进入场景(2D billboard)", "ok");
+}
+
+// ---- 真实登录流 ----
+document.getElementById("go").onclick = () => {
+  document.getElementById("go").disabled = true;
+  log("连接网关 ws://127.0.0.1:8080 …", "info");
+  const ws = new WebSocket("ws://127.0.0.1:8080/?host=127.0.0.1&port=9999");
+  ws.binaryType = "arraybuffer";
+  const framer = new Framer((pkt) => onPacket(decode(pkt), ws));
+  ws.onmessage = (e) => framer.push(new Uint8Array(e.data));
+  ws.onopen = () => { log("已连接 → CL_LOGIN", "ok"); ws.send(encCLLogin({ id: "111111", password: "111111" })); };
+  ws.onerror = () => log("连接错误(网关/服务端在跑?)", "err");
+  ws.onclose = () => log("连接关闭", "info");
+};
+
+function onPacket(p, ws) {
+  if (p.name === "LC_LOGIN_OK") { log(`◀ LC_LOGIN_OK → 请求角色列表`, "ok"); ws.send(encCLGetPCList()); }
+  else if (p.name === "LC_LOGIN_ERROR") { log(`◀ LC_LOGIN_ERROR code=${p.errorID}`, "err"); }
+  else if (p.name === "LC_PC_LIST") { log(`◀ LC_PC_LIST(${p.size}B) → 选 Slayer`, "ok"); ws.send(encCLSelectPC({ pcName: PC_NAME, pcType: 0 })); }
+  else if (p.name === "LC_RECONNECT") {
+    log(`◀ LC_RECONNECT → 移交游戏服 ${p.gameServerIP}:${p.gameServerPort}`, "ok");
+    statEl.innerHTML = `已移交游戏服 ${p.gameServerIP}:${p.gameServerPort}<br>连接 gameserver…`;
+    ws.close(); // loginserver 任务完成
+    connectGame(p);
+  } else { log(`◀ ${p.name}(${p.size}B)`, ""); }
+}
+
+// ---- 第二段: 连 gameserver, CG_CONNECT 入世 ----
+function connectGame(rc) {
+  const port = rc.gameServerPort || 9998;
+  log(`连接 gameserver(网关→${port}) …`, "info");
+  const gws = new WebSocket(`ws://127.0.0.1:8080/?host=127.0.0.1&port=${port}`);
+  gws.binaryType = "arraybuffer";
+  const framer = new Framer((pkt) => onGamePacket(decode(pkt)));
+  gws.onmessage = (e) => framer.push(new Uint8Array(e.data));
+  gws.onopen = () => {
+    log("gameserver 已连 → CG_CONNECT(携带 key)", "ok");
+    gws.send(encCGConnect({ key: rc.key, pcName: PC_NAME, pcType: 0 }));
+  };
+  gws.onerror = () => log("gameserver 连接错误", "err");
+  window.__gws = gws;
+}
+
+function onGamePacket(p) {
+  if (p.name === "GC_UPDATE_INFO") {
+    log(`◀ GC_UPDATE_INFO(${p.size}B) —— 服务端下发角色数据`, "ok");
+    statEl.innerHTML = `✅ 已真正进入游戏世界<br>gameserver 已确认 · 角色: Slayer`;
+    spawnPlayer();
+    window.__entered = true;
+  } else if (p.name === "GC_DISCONNECT") {
+    log(`◀ GC_DISCONNECT —— 被游戏服拒绝`, "err");
+  } else {
+    log(`◀ ${p.name}(${p.size}B)`, "");
+  }
+}
+</script>
+</body>
+</html>

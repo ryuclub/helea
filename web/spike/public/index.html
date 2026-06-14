@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<title>天之炼狱 · Babylon 2D+3D 共存 spike</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #101015; overflow: hidden; }
+  #cv { width: 100vw; height: 100vh; display: block; }
+  #hud { position: fixed; left: 12px; top: 10px; color: #cde; font: 13px/1.5 system-ui, sans-serif;
+         background: rgba(0,0,0,.45); padding: 8px 12px; border-radius: 6px; }
+  .ok { color: #6e6; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud">初始化…</div>
+<script src="/public/vendor/babylon.js"></script>
+<script type="module">
+import { decodePack, decodeCIndexSprite } from "../src/spk.js";
+
+const hud = document.getElementById("hud");
+const canvas = document.getElementById("cv");
+const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true });
+const scene = new BABYLON.Scene(engine);
+scene.clearColor = new BABYLON.Color4(0.06, 0.06, 0.09, 1);
+
+// ---- 正交 等距俯视 相机(固定方位) ----
+const camera = new BABYLON.ArcRotateCamera("cam", -Math.PI / 4, Math.PI / 3.2, 30, new BABYLON.Vector3(0, 0.5, 0), scene);
+camera.mode = BABYLON.Camera.ORTHOGRAPHIC_CAMERA;
+function setOrtho() {
+  const z = 6, a = engine.getRenderWidth() / engine.getRenderHeight();
+  camera.orthoLeft = -z * a; camera.orthoRight = z * a; camera.orthoTop = z; camera.orthoBottom = -z;
+}
+setOrtho();
+
+const light = new BABYLON.HemisphericLight("l", new BABYLON.Vector3(0.3, 1, 0.4), scene);
+light.intensity = 0.95;
+
+// ---- 棋盘地面(3D 平铺地块) ----
+const N = 6;
+for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+  const t = BABYLON.MeshBuilder.CreateBox(`g${r}_${c}`, { width: 1, height: 0.1, depth: 1 }, scene);
+  t.position.set(c - N / 2 + 0.5, 0, r - N / 2 + 0.5);
+  const m = new BABYLON.StandardMaterial(`gm${r}_${c}`, scene);
+  const v = (r + c) & 1 ? 0.22 : 0.16;
+  m.diffuseColor = new BABYLON.Color3(0.10, v + 0.10, 0.13); m.specularColor = BABYLON.Color3.Black();
+  t.material = m;
+}
+
+// ---- 3D 占位素材(将来真 3D 角色就放这里) ----
+const mesh3d = BABYLON.MeshBuilder.CreateCapsule("hero3d", { height: 2.2, radius: 0.5 }, scene);
+mesh3d.position.set(-0.6, 1.1, 0.6);
+const mm = new BABYLON.StandardMaterial("mm", scene);
+mm.diffuseColor = new BABYLON.Color3(0.85, 0.55, 0.2); mm.specularColor = new BABYLON.Color3(0.3, 0.3, 0.3);
+mesh3d.material = mm;
+
+// ---- 2D billboard(原版精灵, P3 解码) ----
+async function loadSprite() {
+  const buf = new Uint8Array(await (await fetch("/public/assets/slayerman00.ispk")).arrayBuffer());
+  const frames = decodePack(buf, decodeCIndexSprite, 12);
+  const f0 = frames[0];
+
+  const texOf = (fr) => {
+    const t = BABYLON.RawTexture.CreateRGBATexture(
+      fr.rgba, fr.width, fr.height, scene, false, true, BABYLON.Texture.NEAREST_SAMPLINGMODE);
+    t.hasAlpha = true;
+    return t;
+  };
+  const textures = frames.map(texOf);
+
+  const aspect = f0.width / f0.height;
+  const H = 2.4, W = H * aspect;
+  const plane = BABYLON.MeshBuilder.CreatePlane("hero2d", { width: W, height: H }, scene);
+  plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+  plane.position.set(0.7, H / 2, -0.4); // 与 3D mesh 深度交错，测遮挡
+
+  const mat = new BABYLON.StandardMaterial("sm", scene);
+  mat.diffuseTexture = textures[0];
+  mat.emissiveColor = new BABYLON.Color3(1, 1, 1); // 不受光，显原色
+  mat.disableLighting = true;
+  mat.useAlphaFromDiffuseTexture = true;
+  mat.transparencyMode = BABYLON.Material.MATERIAL_ALPHATEST; // alpha test → 正确写深度/遮挡
+  plane.material = mat;
+
+  let dir = 0, fi = 0, tick = 0;
+  scene.onBeforeRenderObservable.add(() => {
+    if (++tick % 14 === 0) {
+      fi = (fi + 1) % 4; if (fi === 0) dir = (dir + 1) % 3;
+      mat.diffuseTexture = textures[dir * 4 + fi];
+    }
+  });
+
+  hud.innerHTML = `<span class="ok">✅ Babylon 2D+3D 共存</span><br>` +
+    `2D billboard: 斯雷亚(${f0.width}×${f0.height}, ${frames.length}帧) · 3D mesh: 胶囊占位<br>` +
+    `正交俯视相机固定 · 资源(.spk)直接作 RawTexture`;
+  window.__spikeReady = true;
+}
+
+loadSprite().catch((e) => { hud.textContent = "精灵加载失败: " + e.message; });
+
+engine.runRenderLoop(() => scene.render());
+addEventListener("resize", () => { engine.resize(); setOrtho(); });
+</script>
+</body>
+</html>

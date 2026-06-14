@@ -1,0 +1,7 @@
+{
+  "name": "tzly-resource",
+  "version": "0.1.0",
+  "description": "天之炼狱(DarkEden) 资源解析器 —— .spk/.spki 精灵、地图，输出 PNG/供 WebGL",
+  "type": "module",
+  "private": true
+}

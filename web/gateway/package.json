@@ -1,0 +1,14 @@
+{
+  "name": "tzly-gateway",
+  "version": "0.1.0",
+  "description": "天之炼狱(DarkEden) WebSocket <-> TCP 网关 —— 桥接浏览器与 opendarkeden 服务端",
+  "type": "module",
+  "main": "src/gateway.js",
+  "scripts": {
+    "start": "node src/gateway.js",
+    "test": "node test/loopback.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

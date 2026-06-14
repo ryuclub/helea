@@ -1,0 +1,37 @@
+# ───── 版权素材(绝不入库) ─────
+# 原版客户端(SOFTON 版权)，自备
+DarkEden*/
+**/public/assets/*.spk
+**/public/assets/*.spki
+**/public/assets/*.ispk
+**/public/assets/*.aspk
+**/public/assets/*.sspk
+**/public/assets/*.map
+assets/darkeden-raw/
+!assets/darkeden-raw/README.md
+
+# ───── 上游开源参考(自行 clone, 不入库) ─────
+research/
+
+# ───── 密钥 / 本地配置 ─────
+.claude/config/claude.env
+.claude/.remote-cache/
+.claude/logs/
+.claude/plugins/
+
+# ───── 依赖 / 生成物 ─────
+node_modules/
+**/node_modules/
+**/.tmp/
+**/out/*.png
+**/build/
+# 体积大的 vendor 依赖(用 npm 装回)
+**/public/vendor/babylon.js
+
+# ───── 系统 ─────
+.DS_Store
+*.log
+/tmp/
+
+# 项目通用工具配置(非 Helea 代码, 保持本地)
+.claude/
