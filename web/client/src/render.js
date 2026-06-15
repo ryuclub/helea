@@ -1,94 +1,576 @@
-// 天之炼狱 渲染引擎(Babylon) —— 实体/visual 架构
+// 天之炼狱 渲染引擎(Babylon) —— 2D 等距阶段
 //
-// 设计: 一个正交等距场景(相机固定)。每个实体(Entity)有网格坐标+朝向+状态，
-// 其"外观"(visual)可替换: 现在=2D billboard(.spk 解码帧)，将来=3D mesh，位置/逻辑不动。
+// 原版地砖/角色是预渲染等距 2D 图, 故用正交"正视"相机 + 屏幕像素坐标在 2D 平面合成
+// (地形贴图平面 + 角色精灵平面)。相机倾斜 + 3D 地面留待将来引入 3D 素材时切换。
+// Entity/visual 抽象保留: 现为 2D 精灵平面, 将来可换 3D mesh。
 //
-// 用全局 BABYLON(由 <script src=vendor/babylon.js> 提供)。
+// 坐标: 用"像素世界"——1 世界单位 = 1 像素, 原点在画布中心, Y 向上(Babylon)。
+// 画布像素(px,py 左上原点) → 世界(x = px - Wc/2, y = Hc/2 - py)。
 
-export class Entity {
-  constructor(renderer, { id, col = 0, row = 0 }) {
-    this.r = renderer; this.id = id; this.col = col; this.row = row;
-    this.dir = 0; this.frame = 0; this._tick = 0;
-    this.node = null; this.textures = null; this.material = null; this.dirCount = 1; this.framesPerDir = 1;
-  }
-  // 2D billboard 外观: frames = [{width,height,rgba}], dirCount/framesPerDir 描述方向×帧布局
-  setBillboard(frames, { dirCount = 3, framesPerDir = 4, worldHeight = 2.4 } = {}) {
-    const B = BABYLON, scene = this.r.scene;
-    this.dirCount = dirCount; this.framesPerDir = framesPerDir;
-    this.textures = frames.map((f) => {
-      const t = B.RawTexture.CreateRGBATexture(f.rgba, f.width, f.height, scene, false, true, B.Texture.NEAREST_SAMPLINGMODE);
-      t.hasAlpha = true; return t;
-    });
-    const f0 = frames[0], W = worldHeight * (f0.width / f0.height);
-    const plane = B.MeshBuilder.CreatePlane(`e${this.id}`, { width: W, height: worldHeight }, scene);
-    plane.billboardMode = B.Mesh.BILLBOARDMODE_ALL;
-    const mat = new B.StandardMaterial(`m${this.id}`, scene);
-    mat.diffuseTexture = this.textures[0];
-    mat.emissiveColor = new B.Color3(1, 1, 1); mat.disableLighting = true;
-    mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST;
-    mat.specularColor = B.Color3.Black();
-    plane.material = mat;
-    this.node = plane; this.material = mat; this._h = worldHeight;
-    this.place();
-    return this;
-  }
-  // 将来: 用 3D mesh 替换 visual(位置不动)
-  setMesh(mesh, worldHeight = 2.2) {
-    if (this.node) this.node.dispose();
-    this.node = mesh; this._h = worldHeight; this.place();
-    return this;
-  }
-  setGrid(col, row) { this.col = col; this.row = row; this.place(); return this; }
-  place() { if (this.node) this.node.position = this.r.isoToWorld(this.col, this.row, (this._h || 2) / 2); }
-  // 行走动画(billboard): 循环帧, 轮换朝向(占位)
-  animate() {
-    if (!this.textures) return;
-    if (++this._tick % 14 !== 0) return;
-    this.frame = (this.frame + 1) % this.framesPerDir;
-    if (this.frame === 0) this.dir = (this.dir + 1) % this.dirCount;
-    this.material.diffuseTexture = this.textures[this.dir * this.framesPerDir + this.frame];
-  }
+// 深度: 由地形画布的"底边 Y"(像素)换算 Babylon z。相机立于 -Z 看向 +Z,
+// z 越小越靠近相机(越靠前)。baseY 越大(越靠屏幕下方=等距越近)→ z 越负 → 越靠前 → 遮挡上方物件。
+const DEPTH_EPS = 0.01;       // 每像素 z 步进(相邻行差 tileH*EPS ≈ 0.24, 深度缓冲足够分辨)
+const DEPTH_GROUND = 1;       // 地面恒在所有物件之后
+const depthZ = (baseY) => -baseY * DEPTH_EPS;
+// 深度: 物件用 viewpoint(锚点行)、角色用所在行中点, 同基准 → 北边物件在后/南边在前(开源扇区画家),
+// 不再需要 CHAR_DEPTH_BIAS 硬偏置(已移除)。
+
+// 移动矢量(dc=列增, dr=行增; 矩形网格: 列+=右, 行+=下)→ DarkEden 8 方向枚举
+// 0 LEFT,1 LEFTDOWN,2 DOWN,3 RIGHTDOWN,4 RIGHT,5 RIGHTUP,6 UP,7 LEFTUP
+function dirOf(dc, dr) {
+  if (dc < 0 && dr < 0) return 7; if (dc < 0 && dr > 0) return 1;
+  if (dc > 0 && dr < 0) return 5; if (dc > 0 && dr > 0) return 3;
+  if (dc < 0) return 0; if (dc > 0) return 4; if (dr < 0) return 6; return 2;
 }
 
+import { currentEpoch } from "./terrain.js";   // 换区代次守门: 丢弃旧 zone 在途块结果
+
+const TW = 48, TH = 24;       // 地砖像素(全局坐标基准)
+const BLOCK = 16;             // 区块边长(格), 必须与 terrain.js 一致
+// 开源客户端整张地图常驻内存(MZone::m_ppSector 全量), zone 内从不卸载, 只按可视窗口(±10列/±16行)绘制。
+// 我们用区块流式, 但要逼近开源: 加载半径放大到远超可视窗口(±48格), 提前把前方块备好(消除"该载没载的黑块");
+// 卸载半径再留足滞回(±64格, RB+1), 让跨多块的高建筑不会因底部块被提前卸载而整楼消失(=空气墙真因之一)。
+const RB = 3;                 // 加载半径(块, ±48 格): 远超开源可视窗口 → 移动时前方早已就绪
+const MAX_CONCURRENT_LOADS = 6; // 区块并发加载上限(并行 fetch, 消除"边缘黑块过会儿才显示")
+const BUILD_PER_FRAME = 40;   // 每帧最多创建的建筑数(全局限速, 防单帧爆量)
+// 墙透明椭圆窗半轴(像素): 纵向椭圆, 比角色(精灵约 48宽×96高)稍大 → 约 68宽×124高 刚好包住人。
+const WALL_TRANS_RX = 34, WALL_TRANS_RY = 62;
+
 export class GameRenderer {
-  constructor(canvas) { this.canvas = canvas; this.entities = []; }
+  constructor(canvas) {
+    this.canvas = canvas; this.entities = [];
+    this._others = new Map();        // objectID -> 其他玩家实体(复用主角精灵管线)
+    this._walls = [];                // 可透明墙(bTrans)网格 {mesh,gx,gy,w,h,vpRow}: 角色走到墙后→半透明(开源 IsWallTransPosition)
+    this._blocks = new Map();        // "bx,by" -> {bx,by,ground,buildings:[],loading}
+    this._blockLoader = null; this._map = null;   // 在途块数从 _blocks 里 loading:true 实时统计(无独立计数器)
+    this._loadingAll = false; this._wholeMapLoaded = false;  // 整区同步加载模式(开源整图常驻): 期间/之后停用异步流式
+    this._zoneObjects = [];          // 本 zone 全部物件网格(整区常驻, 对齐开源; 不按块/半径丢弃, 换区才整批清)
+    this._objQ = null;               // 物件创建队列(进区一次性入队, 逐帧限速建网格)
+    // 换区原子性门(对齐开源"换区同步重建, 无在途任务"): 换区一开始(clearBlocks)置 false → 关闭地砖流式,
+    // 直到新区地图/物件/玩家就位(markZoneReady)再开。否则换区途中 _updateBlocks 会用"旧 zone 的 _map"
+    // 建块却打上"新 epoch"(initTerrain 里 _epoch++ 先于 _map 赋值) → 旧区内容混入新区 = 错块/黑带。
+    this._zoneReady = true;
+    this._focusCol = 128; this._focusRow = 128;
+  }
+
   buildScene() {
     const B = BABYLON;
     this.engine = new B.Engine(this.canvas, true, { preserveDrawingBuffer: true });
     this.scene = new B.Scene(this.engine);
-    this.scene.clearColor = new B.Color4(0.05, 0.05, 0.08, 1);
-    const cam = new B.ArcRotateCamera("cam", -Math.PI / 4, Math.PI / 3.2, 30, new B.Vector3(0, 0.5, 0), this.scene);
+    this.scene.clearColor = new B.Color4(0.04, 0.04, 0.06, 1);
+    // 正视正交相机: 立于 -Z 看向 +Z 的 XY 平面
+    const cam = new B.FreeCamera("cam", new B.Vector3(0, 0, -100), this.scene);
+    cam.setTarget(B.Vector3.Zero());
     cam.mode = B.Camera.ORTHOGRAPHIC_CAMERA;
-    this.camera = cam; this._setOrtho();
-    const light = new B.HemisphericLight("l", new B.Vector3(0.3, 1, 0.4), this.scene);
-    light.intensity = 0.95;
+    this.camera = cam; this._zoom = 1; this._setOrtho();
+    // 仅影响 3D mesh(2D 精灵/地砖是 unlit)。groundColor 抬高背光面亮度, 避免 3D 角色偏黑。
+    const hemi = new B.HemisphericLight("l", new B.Vector3(0, 1, 0), this.scene);
+    hemi.intensity = 1.35; hemi.groundColor = new B.Color3(0.75, 0.75, 0.75);
     addEventListener("resize", () => { this.engine.resize(); this._setOrtho(); });
+    GameRenderer._registerWallShader();
     return this;
+  }
+
+  // 墙透明着色器(忠实开源 m_ImageObjectFilter): 逐像素圆形挖洞 —— 以角色为中心、半径内的墙像素半透明,
+  // 圆外保持不透明(屏幕上=围绕角色的椭圆窗口)。开源是 200×200 滤镜 k=sqrt((i-100)²+(j-100)²) 在半径~84px 内挖空。
+  // 我们世界坐标 1单位=1像素(_gw: y 取负), 故 distance(片元世界, 角色世界) 即屏幕像素距离, 圆内 alpha 降。
+  static _registerWallShader() {
+    const B = BABYLON;
+    if (B.Effect.ShadersStore["heleaWallVertexShader"]) return;
+    B.Effect.ShadersStore["heleaWallVertexShader"] = `
+precision highp float;
+attribute vec3 position; attribute vec2 uv;
+uniform mat4 worldViewProjection; uniform mat4 world;
+varying vec2 vUV; varying vec2 vWorld;
+void main(){ vUV = uv; vWorld = (world * vec4(position,1.0)).xy; gl_Position = worldViewProjection * vec4(position,1.0); }`;
+    B.Effect.ShadersStore["heleaWallFragmentShader"] = `
+precision highp float;
+varying vec2 vUV; varying vec2 vWorld;
+uniform sampler2D diffuse; uniform vec2 uPlayer; uniform vec2 uRadii; uniform float uEnable;
+void main(){
+  vec4 c = texture2D(diffuse, vUV);
+  if (c.a < 0.5) discard;                       // alpha test: 全透明纹素丢弃(等价开源色键)
+  float a = 1.0;
+  vec2 d = (vWorld - uPlayer) / uRadii;         // 椭圆: 横/纵各除以半轴(uRadii.x 横, .y 纵)
+  if (uEnable > 0.5 && dot(d, d) < 1.0) a = 0.42; // 角色周围椭圆内 → 半透明窗口
+  gl_FragColor = vec4(c.rgb, a);
+}`;
   }
   _setOrtho() {
-    const z = 7, a = this.engine.getRenderWidth() / this.engine.getRenderHeight();
+    const w = this.engine.getRenderWidth() / 2 / this._zoom;
+    const h = this.engine.getRenderHeight() / 2 / this._zoom;
     const c = this.camera;
-    c.orthoLeft = -z * a; c.orthoRight = z * a; c.orthoTop = z; c.orthoBottom = -z;
+    c.orthoLeft = -w; c.orthoRight = w; c.orthoTop = h; c.orthoBottom = -h;
   }
-  // 网格(col,row) → 世界坐标(以网格中心为原点)
-  isoToWorld(col, row, y = 0) {
-    return new BABYLON.Vector3(col - this._cx, y, row - this._cy);
+  setZoom(z) { this._zoom = z; this._setOrtho(); return this; }
+
+  // 全局像素 → 世界坐标(世界原点=地图像素原点; Y 向上 → 取负)。与区块无关 → 区块拼接无缝。
+  _gw(gx, gy) { return new BABYLON.Vector3(gx, -gy, 0); }
+  setMap(m) { this._map = m; return this; }
+  setBlockLoader(fn) { this._blockLoader = fn; return this; } // (bx,by)=>Promise<{canvas,width,height,gx0,gy0,buildings}|null>
+  setFocus(col, row) { this._focusCol = col; this._focusRow = row; return this; } // 玩家未生成前的初始加载中心
+  // 换区原子门: 新区地图/物件/玩家全部就位后调用, 重新开启地砖流式(对齐开源换区同步重建完成)。
+  markZoneReady() { this._zoneReady = true; return this; }
+  // 玩家(或聚焦)所在块的地砖是否已建好 —— 换区加载界面据此撤除(避免撤早露黑)。
+  isFocusBlockReady() {
+    const e = this.player;
+    const col = e ? e.col : this._focusCol, row = e ? e.row : this._focusRow;
+    const b = this._blocks.get(Math.floor(col / BLOCK) + "," + Math.floor(row / BLOCK));
+    return !!(b && b.ground && !b.loading);
   }
-  addGround(cols, rows) {
-    const B = BABYLON; this._cx = cols / 2 - 0.5; this._cy = rows / 2 - 0.5;
-    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-      const t = B.MeshBuilder.CreateBox(`g${r}_${c}`, { width: 1, height: 0.1, depth: 1 }, this.scene);
-      t.position = this.isoToWorld(c, r, 0);
-      const m = new B.StandardMaterial(`gm${r}_${c}`, this.scene);
-      const v = (r + c) & 1 ? 0.24 : 0.17;
-      m.diffuseColor = new B.Color3(0.10, v + 0.08, 0.13); m.specularColor = B.Color3.Black();
-      t.material = m;
+
+  // 区块网格流式: 每帧最多发起1块加载/卸载1块; 玩家所在块 ±RB 内保持加载。
+  // 整区同步加载(开源整图常驻做法): 换区时一次性 await 全图所有块, 加载完再放角色 → 无异步流式竞态、无漏块。
+  // 换区代次(epoch)中途变了立即停止(说明又换区了)。
+  async loadAllBlocks() {
+    const m = this._map; if (!m || !this._blockLoader) return;
+    const bw = Math.ceil(m.width / BLOCK), bh = Math.ceil(m.height / BLOCK);
+    // 大图(如 eslania 256×256=256块)整区同步要 6s+ 且纹理过多(移动端 OOM) → 只对小图(地牢/小场景, 128×128=64块≈0.6s)
+    // 整区同步; 大图仍走流式(大图多为登录直进的开阔区, 不经快速换区, 流式正常)。
+    if (bw * bh > 100) { this._wholeMapLoaded = false; this._loadingAll = false; return; }
+    this._loadingAll = true; this._wholeMapLoaded = false;
+    const ld = currentEpoch();
+    for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) {
+      if (ld !== currentEpoch()) { this._loadingAll = false; return; }   // 已换区 → 放弃本区
+      const k = bx + "," + by; if (this._blocks.has(k)) continue;
+      let data = null; try { data = await this._blockLoader(bx, by); } catch { data = null; }
+      if (ld !== currentEpoch()) { this._loadingAll = false; return; }
+      if (data && data.epoch === ld) { this._blocks.set(k, { bx, by, ground: null, buildings: [], loading: true, epoch: ld }); this._addBlock(k, data); }
     }
+    this._loadingAll = false; this._wholeMapLoaded = true;
+  }
+
+  _updateBlocks(col, row) {
+    if (!this._blockLoader) return;
+    if (!this._zoneReady) return;                           // 换区原子门: 新区未就位时不流式(防旧 _map 污染新区)
+    if (this._loadingAll || this._wholeMapLoaded) return;   // 整区同步模式: 不做异步流式加载/卸载(全图常驻)
+    const pc = Math.floor(col / BLOCK), pr = Math.floor(row / BLOCK);
+    // 地图块边界(超出此范围的块不存在, 绝不选为候选): 否则越界块每帧 建→null→删→重选, 抢占并发槽饿死边缘真块=黑。
+    const m = this._map;
+    const bcols = m ? Math.ceil(m.width / BLOCK) : 0, brows = m ? Math.ceil(m.height / BLOCK) : 0;
+    // 卸载: 超出 RB+1 的已载块(滞回, 防边界抖动)
+    for (const [k, blk] of this._blocks) {
+      if (Math.abs(blk.bx - pc) > RB + 1 || Math.abs(blk.by - pr) > RB + 1) { this._removeBlock(k); break; }
+    }
+    // 在途数 = _blocks 里 loading:true 的占位个数(实时统计, 自校正, 永不漂移卡死)。
+    // 旧实现用独立计数器 _blockLoadingCount, 在多次快速换区+epoch丢弃下会漂移卡在高位 → 不再加载 → 黑块。
+    let inflight = 0; for (const b of this._blocks.values()) if (b.loading) inflight++;
+    // 并发加载 RB 内缺失块(近者优先, 仅地图内有效块), 最多 MAX_CONCURRENT_LOADS 个在途。
+    while (inflight < MAX_CONCURRENT_LOADS) {
+      let best = null, bestD = 1e9;
+      for (let by = Math.max(0, pr - RB); by <= Math.min(brows - 1, pr + RB); by++)
+        for (let bx = Math.max(0, pc - RB); bx <= Math.min(bcols - 1, pc + RB); bx++) {
+        const k = bx + "," + by; if (this._blocks.has(k)) continue;
+        const d = (bx - pc) ** 2 + (by - pr) ** 2; if (d < bestD) { bestD = d; best = { bx, by, k }; }
+      }
+      if (!best) return;
+      const ld = currentEpoch();                  // 本次加载的代次, 标在占位上
+      inflight++;
+      this._blocks.set(best.k, { bx: best.bx, by: best.by, ground: null, buildings: [], loading: true, epoch: ld }); // 占位(loading:true 计入在途)
+      Promise.resolve(this._blockLoader(best.bx, best.by))
+        // 守门: 只处理"仍是本任务自己代次的占位"; 若已换区/被新代次占位取代 → 丢弃(防误删新块或贴旧块)
+        .then((data) => {
+          const blk = this._blocks.get(best.k); if (!blk || blk.epoch !== ld) return;
+          if (data && data.epoch === ld) this._addBlock(best.k, data); else this._blocks.delete(best.k);
+        })
+        .catch(() => { const blk = this._blocks.get(best.k); if (blk && blk.epoch === ld) this._blocks.delete(best.k); });
+    }
+  }
+
+  _addBlock(key, data) {
+    const B = BABYLON, blk = this._blocks.get(key); if (!blk) return;
+    // 地面(单块小贴图, 真机 1-2ms)
+    const tex = new B.DynamicTexture("g", { width: data.width, height: data.height }, this.scene, false, B.Texture.NEAREST_SAMPLINGMODE);
+    tex.getContext().drawImage(data.canvas, 0, 0); tex.update(); tex.hasAlpha = true;
+    const gp = B.MeshBuilder.CreatePlane("g", { width: data.width, height: data.height }, this.scene);
+    const c = this._gw(data.gx0 + data.width / 2, data.gy0 + data.height / 2);
+    gp.position = new B.Vector3(c.x, c.y, DEPTH_GROUND);
+    const gm = new B.StandardMaterial("gm", this.scene);
+    gm.diffuseTexture = tex; gm.emissiveColor = new B.Color3(1, 1, 1); gm.disableLighting = true;
+    gm.useAlphaFromDiffuseTexture = true; gm.transparencyMode = B.Material.MATERIAL_ALPHATEST; gm.specularColor = B.Color3.Black();
+    gp.material = gm; blk.ground = gp;
+    blk.loading = false;
+  }
+
+  // 进区: 接收本 zone 全部物件绘制数据(对齐开源整区常驻), 入队逐帧限速建网格。换区时由 clearBlocks 整批清。
+  loadZoneObjects(list) {
+    if (!list || !list.length) { this._objQ = null; return; }
+    this._objQ = { list, i: 0 };
+  }
+
+  // 每帧从物件队列创建至多 BUILD_PER_FRAME 个(全局限速)。物件整区常驻, 不随块卸载 → 绝不黑洞。
+  _drainBuildQueue() {
+    const B = BABYLON;
+    if (!this._objQ) return;
+    let budget = BUILD_PER_FRAME;
+    const q = this._objQ;
+    const end = Math.min(q.i + budget, q.list.length);
+    for (; q.i < end; q.i++) {
+      const b = q.list[q.i];
+      const tx = B.RawTexture.CreateRGBATexture(b.rgba, b.width, b.height, this.scene, false, true, B.Texture.NEAREST_SAMPLINGMODE); tx.hasAlpha = true;
+      const pl = B.MeshBuilder.CreatePlane("obj", { width: b.width, height: b.height }, this.scene);
+      const w = this._gw(b.gx + b.width / 2, b.gy + b.height / 2);
+      pl.position = new B.Vector3(w.x, w.y, depthZ(b.baseY));
+      const isWall = (b.bTrans & 1);   // OBJECT_TRANS_FLAG(bit0): 可透明墙 → 用圆窗着色器; 其余 → 普通不透明材质
+      let mat;
+      if (isWall) {
+        mat = new B.ShaderMaterial("wallm", this.scene, { vertex: "heleaWall", fragment: "heleaWall" },
+          { attributes: ["position", "uv"], uniforms: ["world", "worldViewProjection", "uPlayer", "uRadii", "uEnable"],
+            samplers: ["diffuse"], needAlphaBlending: true });
+        mat.setTexture("diffuse", tx);
+        mat.setVector2("uPlayer", new B.Vector2(-1e9, -1e9)); // 初始远离 → 全不透明
+        mat.setVector2("uRadii", new B.Vector2(WALL_TRANS_RX, WALL_TRANS_RY)); // 椭圆半轴(横,纵)
+        mat.setFloat("uEnable", 0);
+        mat.backFaceCulling = false;
+        mat.forceDepthWrite = true;     // 仍写深度 → 墙正常遮挡其它; 仅圆窗像素混合透出角色
+      } else {
+        mat = new B.StandardMaterial("om", this.scene);
+        mat.diffuseTexture = tx; mat.emissiveColor = new B.Color3(1, 1, 1); mat.disableLighting = true;
+        mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST; mat.specularColor = B.Color3.Black();
+      }
+      pl.material = mat; this._zoneObjects.push(pl);
+      if (isWall) this._walls.push({ mesh: pl, mat, gx: b.gx, gy: b.gy, w: b.width, h: b.height, vpRow: b.vpRow, _en: 0 });
+    }
+    if (q.i >= q.list.length) this._objQ = null;
+  }
+
+  _removeBlock(key) {
+    const blk = this._blocks.get(key); if (!blk) return;
+    if (blk.ground) { blk.ground.material?.diffuseTexture?.dispose(); blk.ground.material?.dispose(); blk.ground.dispose(); }
+    for (const pl of blk.buildings) { pl.material?.diffuseTexture?.dispose(); pl.material?.dispose(); pl.dispose(); }
+    this._blocks.delete(key);
+  }
+
+  // 换区: 清空当前所有区块(连同在途占位)/建筑队列 + 移除所有其他玩家(旧区视野失效)。换图前调用。
+  // 在途块占位也一并删除 → 在途数(loading:true 统计)自然归零; 旧任务回调由 epoch 守门丢弃。
+  // 换区也要清掉主角在途步进, 防跨 zone 插值拖影。
+  clearBlocks() {
+    this._wholeMapLoaded = false; this._loadingAll = false;   // 换区: 退出旧区整图常驻态(新区会重新整区加载)
+    this._zoneReady = false;                                  // 换区原子门: 关流式, 直到新区就位(markZoneReady)
+    for (const k of [...this._blocks.keys()]) this._removeBlock(k);
+    // 整批清本 zone 常驻物件(对齐开源换区整体重建): 释放网格+纹理+材质。
+    for (const pl of this._zoneObjects) { pl.material?.diffuseTexture?.dispose(); pl.material?.dispose(); pl.dispose(); }
+    this._zoneObjects.length = 0; this._objQ = null;
+    this._walls.length = 0;
+    if (this.player) { this.player.stepping = false; this._awaitingMove = false; this.path = null; }
+    for (const id of [...this._others.keys()]) this.removeOther(id);
+  }
+  // 仅清其他玩家(重连时旧 objectID 失效, 保留地形)。
+  clearOthers() { for (const id of [...this._others.keys()]) this.removeOther(id); }
+
+  // 墙透明(忠实开源 m_ImageObjectFilter 圆形滤镜): 每帧把"圆心=角色"喂给墙着色器, 着色器逐像素判断:
+  // 角色周围半径内的墙像素半透明(透出角色), 圆外不变 → 屏幕上=围绕角色的椭圆窗口, 而非整面墙变透明。
+  // 仅对"在角色前方(vpRow>=pRow)且矩形逼近圆"的墙开启(uEnable=1, 省 uniform); 其余关闭(uEnable=0)。
+  _updateWallTransparency(pCol, pRow) {
+    const px = pCol * TW + TW / 2, cy = pRow * TH - 36; // 椭圆心(全局像素): 角色身体中心(脚底上方约半身, 纵椭圆覆盖全身)
+    const pwx = px, pwy = -cy;                          // 世界坐标(_gw: y 取负)
+    const ex = WALL_TRANS_RX + 4, ey = WALL_TRANS_RY + 4;
+    let purge = false;
+    for (const wll of this._walls) {
+      const m = wll.mesh;
+      if (!m || m.isDisposed()) { purge = true; continue; }
+      // 墙矩形到椭圆心最近点的椭圆归一化距离 < 1(才可能有窗口像素) 且 墙在角色前方
+      const nx = Math.max(wll.gx, Math.min(px, wll.gx + wll.w));
+      const ny = Math.max(wll.gy, Math.min(cy, wll.gy + wll.h));
+      const dx = (nx - px) / ex, dy = (ny - cy) / ey;
+      const en = (dx * dx + dy * dy < 1 && wll.vpRow >= pRow) ? 1 : 0;
+      if (en) wll.mat.setVector2("uPlayer", new BABYLON.Vector2(pwx, pwy)); // 椭圆心随角色移动
+      if (en !== wll._en) { wll.mat.setFloat("uEnable", en); wll._en = en; }
+    }
+    if (purge) this._walls = this._walls.filter((w) => w.mesh && !w.mesh.isDisposed());
+  }
+
+  // 角色精灵实体。framesById={[spriteID]:{rgba,width,height}}; anim={stand,move}, 每个=dirs[8] of [{s,cx,cy}]
+  // (来自 cfpk 帧包: 每帧含精灵ID + 脚底偏移 cX/cY; 序列已含原版"每姿势保持数帧的乒乓"走法)
+  // 通用精灵实体构建(主角与其他玩家共用)。不挂相机/指针, 不设 this.player。
+  _makeSpriteEntity(framesById, col, row, anim, name = "spr") {
+    const B = BABYLON;
+    const textures = {}, frameMeta = {};  // 按 spriteID 索引(稀疏)
+    for (const id in framesById) {
+      const f = framesById[id]; if (!f) continue;
+      const tx = B.RawTexture.CreateRGBATexture(f.rgba, f.width, f.height, this.scene, false, true, B.Texture.NEAREST_SAMPLINGMODE);
+      tx.hasAlpha = true; textures[id] = tx; frameMeta[id] = { w: f.width, h: f.height };
+    }
+    const plane = B.MeshBuilder.CreatePlane(name, { size: 1 }, this.scene); // 单位平面, 逐帧缩放
+    const mat = new B.StandardMaterial(name + "m", this.scene);
+    mat.emissiveColor = new B.Color3(1, 1, 1); mat.disableLighting = true;
+    mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST; mat.specularColor = B.Color3.Black();
+    plane.material = mat;
+    return { plane, mat, textures, frameMeta, anim, col, row, dir: 2,
+      action: "stand", animIdx: 0, animClock: 0, _lastNow: 0, frameOverride: null, oneShot: null,
+      stepping: false, fromCol: col, fromRow: row, toCol: col, toRow: row, t0: 0, stepMs: 320 };
+  }
+
+  spawnSprite(framesById, col, row, anim) {
+    const e = this._makeSpriteEntity(framesById, col, row, anim, "hero");
+    this.entities.push(e); this.player = e;
+    this.intent = { dc: 0, dr: 0 };   // 键盘移动意图(按住连续走)
+    this.path = null;                  // 鼠标寻路路径(格子数组)
+    this._renderAt(e, e.col, e.row);
+    this._centerTile(e.col, e.row);
+    this._installPointer();
+    return e;
+  }
+
+  // ───── 其他玩家(视野内) ─────
+  // 出现/更新: GC_ADD_SLAYER 等。framesById/anim 与主角同一套(同为三族角色精灵)。
+  addOther(objectID, framesById, col, row, dir, anim) {
+    let e = this._others.get(objectID);
+    if (e) { e.col = col; e.row = row; e.dir = dir; e.stepping = false; this._renderAt(e, col, row); return e; }
+    e = this._makeSpriteEntity(framesById, col, row, anim, "oth" + objectID);
+    e.dir = dir; this._others.set(objectID, e); this._renderAt(e, col, row);
+    return e;
+  }
+  // 他人移动 GC_MOVE(282): 平滑步进到 (nc,nr), 朝向 dir。
+  otherStep(objectID, nc, nr, dir) {
+    const e = this._others.get(objectID); if (!e) return;
+    e.dir = dir; e.action = "move";
+    e.fromCol = e.col; e.fromRow = e.row; e.toCol = nc; e.toRow = nr;
+    e.stepping = true; e.t0 = performance.now();
+  }
+  // 他人离开视野 GC_DELETE_OBJECT(232): 释放资源。
+  removeOther(objectID) {
+    const e = this._others.get(objectID); if (!e) return;
+    try { e.plane.dispose(); e.mat.dispose(); for (const id in e.textures) e.textures[id] && e.textures[id].dispose(); } catch {}
+    this._others.delete(objectID);
+  }
+  // 每帧驱动其他玩家: 推进动画 + 步进插值 + 绘制(无相机跟随)。
+  _updateOther(e, now, frameMs) {
+    if (!e._lastNow) e._lastNow = now;
+    e.animClock += now - e._lastNow; e._lastNow = now;
+    while (e.animClock >= frameMs) { e.animClock -= frameMs; e.animIdx++; }
+    if (e.stepping) {
+      e.action = "move";
+      const p = Math.min(1, (now - e.t0) / e.stepMs);
+      const a = this._tileGTL(e.fromCol, e.fromRow), b = this._tileGTL(e.toCol, e.toRow);
+      const gx = a.x + (b.x - a.x) * p, gy = a.y + (b.y - a.y) * p;
+      this._drawFrame(e, gx, gy);
+      if (p >= 1) { e.col = e.toCol; e.row = e.toRow; e.stepping = false; }
+    } else {
+      if (e.action !== "stand") e.action = "stand";
+      this._renderAt(e, e.col, e.row);
+    }
+  }
+
+  // 格子 → 全局瓦片左上像素(与窗口无关)
+  _tileGTL(col, row) { return { x: col * TW, y: row * TH }; }
+  // 当前序列帧 {s,cx,cy}; frameOverride!=null 时用指定帧(一次性动作), 否则循环
+  _curFrame(e) {
+    const seq = e.anim[e.action] && e.anim[e.action][e.dir]; if (!seq || !seq.length) return null;
+    const idx = (e.frameOverride != null) ? Math.min(e.frameOverride, seq.length - 1) : (e.animIdx % seq.length);
+    return seq[idx];
+  }
+  // 把当前帧画到"全局瓦片左上=(gx,gy)": 应用 cX/cY 偏移 + 按帧缩放 + 脚底(瓦片底)定深度
+  _drawFrame(e, gx, gy) {
+    const fr = this._curFrame(e); if (!fr) return;
+    const m = e.frameMeta[fr.s]; if (!m) return;
+    const cx = gx + fr.cx + m.w / 2, cy = gy + fr.cy + m.h / 2;   // 贴图中心(全局像素)
+    const w = this._gw(cx, cy);
+    const depthY = gy + TH / 2;                                   // 角色深度=所在行中点(开源扇区画家: 生物半行前置, 赢同行物件、被南行物件遮挡)
+    e.plane.position.set(w.x, w.y, depthZ(depthY));               // 与物件 viewpoint 深度同基准, 无需硬偏置
+    e.plane.scaling.x = m.w; e.plane.scaling.y = m.h;
+    e.mat.diffuseTexture = e.textures[fr.s];
+  }
+  _renderAt(e, col, row) { const tl = this._tileGTL(col, row); this._drawFrame(e, tl.x, tl.y); }
+  _centerTile(col, row) { this._camTo(col * TW + TW / 2, row * TH + TH / 2); }
+  _camTo(gx, gy) {
+    const w = this._gw(gx, gy);
+    this.camera.position = new BABYLON.Vector3(w.x, w.y, -100);
+    this.camera.setTarget(new BABYLON.Vector3(w.x, w.y, 0));
+  }
+
+  // 2D/3D 共存演示: 导入 Babylon 官方 Dude 模型(骨骼行走动画), 克隆 count 个放在 (col,row) 一带。
+  // 与 2D 地砖/精灵同场渲染, 验证未来可逐步替换为 3D 素材。无特殊处理, 原样加入。
+  addDudes3D(col, row, count = 1) {
+    const B = BABYLON;
+    B.SceneLoader.ImportMesh("", "https://playground.babylonjs.com/scenes/Dude/", "Dude.babylon", this.scene,
+      (meshes, ps, skeletons) => {
+        const root = meshes[0];
+        const bb = root.getHierarchyBoundingVectors(true);
+        const s = 90 / Math.max(1, bb.max.y - bb.min.y);   // 自动缩放到约 90px 高(更小)
+        const depth = Math.max(0.001, bb.max.z - bb.min.z);
+        const place = (mesh, cc) => {
+          // z 压扁到约一个深度槽(正交直视 z 轴 → 厚度不可见), 使其与 2D 同一深度缓冲正确遮挡
+          mesh.scaling.set(s, s, 0.2 / depth);
+          mesh.rotation = new B.Vector3(0, 0, 0);          // 面朝相机(正面)
+          const w = this._gw(cc * TW + TW / 2, row * TH + TH / 2);
+          mesh.position = new B.Vector3(w.x, w.y, depthZ(row * TH + TH / 2)); // 同 2D 角色: 行中点深度
+        };
+        // 去掉镜面高光: specular 依赖相机位置, 相机跟随主角 → 否则模型亮度随主角远近/角度变化。改纯漫反射。
+        const killSpec = (mat) => {
+          if (!mat) return;
+          if (mat.subMaterials) { mat.subMaterials.forEach(killSpec); return; }
+          if (mat.specularColor) mat.specularColor = new B.Color3(0, 0, 0);
+          if ("specularPower" in mat) mat.specularPower = 0;
+        };
+        meshes.forEach((m) => killSpec(m.material));
+        place(root, col);
+        if (skeletons[0]) this.scene.beginAnimation(skeletons[0], 0, 100, true, 1.0);
+        for (let i = 1; i < count; i++) {
+          const c = root.clone("dude" + i);
+          place(c, col + i * 3);
+          if (skeletons[0]) { const sk = skeletons[0].clone("sk" + i); c.skeleton = sk; this.scene.beginAnimation(sk, 0, 100, true, 1.0); }
+        }
+        if (this.onLog) this.onLog(`3D 演示: Dude×${count} 已载入(骨骼行走动画)`);
+      },
+      null,
+      (scene, msg) => { if (this.onLog) this.onLog("3D 模型加载失败(需联网): " + msg); }
+    );
     return this;
   }
-  spawn(opts) { const e = new Entity(this, opts); this.entities.push(e); return e; }
+
+  // 键盘移动意图: dc,dr ∈ {-1,0,1}; (0,0)=松开停步。移动会中断/解除一次性动作(攻击/死亡)。
+  setIntent(dc, dr) { this.intent = { dc, dr }; if (dc || dr) { this.path = null; if (this.player) this.player.oneShot = null; } }
+
+  // 服务器权威移动: 设置移动请求回调。设了之后, 移动意图不再本地步进, 而是回调(dir,curCol,curRow)发 CG_MOVE,
+  // 等服务器 GC_MOVE_OK 后由 serverStep 播放到新格。null=本地模拟模式。
+  setNetMove(fn) { this._netMove = fn; this._awaitingMove = false; return this; }
+  // 服务器确认移动: 动画步进到 (nc,nr), 朝向 dir。
+  serverStep(nc, nr, dir) {
+    const e = this.player; if (!e) return;
+    e.dir = dir; e.action = "move";
+    e.fromCol = e.col; e.fromRow = e.row; e.toCol = nc; e.toRow = nr;
+    e.stepping = true; e.t0 = performance.now();
+  }
+  // 服务器拒绝移动(GC_MOVE_ERROR): 重同步到服务器坐标。
+  serverReject(x, y) {
+    const e = this.player; if (!e) return;
+    e.col = x; e.row = y; e.stepping = false; this._awaitingMove = false; this._renderAt(e, x, y);
+  }
+  // 传送落点: 把现有角色放到新区坐标 + 相机居中(换区后调用)。
+  placePlayer(x, y) {
+    const e = this.player; if (!e) return;
+    e.col = x; e.row = y; e.stepping = false; this._awaitingMove = false; e.action = "stand"; e.animIdx = 0;
+    this._renderAt(e, x, y); this._centerTile(x, y);
+  }
+
+  // 一次性动作(攻击 attack / 死亡 die): 播一遍。hold=true 定格末帧(死亡), 否则播完回站立。
+  playAction(name, hold = false) {
+    const e = this.player; if (!e || !(e.anim[name] && e.anim[name].length)) return;
+    e.oneShot = { action: name, start: e.animIdx, hold };
+    this.intent = { dc: 0, dr: 0 }; this.path = null; e.stepping = false;
+  }
+
+  // 格子可走性: 在界内 且 非 BLOCK_GROUND(0x02)
+  _walkable(col, row) {
+    const m = this._map;
+    if (!m || col < 0 || row < 0 || col >= m.width || row >= m.height) return false;
+    return !(m.property[row * m.width + col] & 0x02);
+  }
+  // 鼠标点击目标格 → BFS 寻路
+  moveTo(col, row) {
+    const m = this._map;
+    if (this.player) this.player.oneShot = null; // 鼠标移动解除一次性动作
+    const tc = Math.max(0, Math.min(m.width - 1, col)), tr = Math.max(0, Math.min(m.height - 1, row));
+    const e = this.player;
+    const path = this._findPath(e.col, e.row, tc, tr);
+    if (path && path.length) { this.path = path; this.intent = { dc: 0, dr: 0 }; }
+  }
+  // BFS 寻路(8 向, 不穿墙角, 节点上限 30000)。返回不含起点的格子数组, 无路返回 null。
+  _findPath(sc, sr, tc, tr) {
+    if (!this._walkable(tc, tr) || (sc === tc && sr === tr)) return null;
+    const m = this._map, W = m.width, key = (c, r) => r * W + c;
+    const prev = new Map(); const q = [[sc, sr]]; prev.set(key(sc, sr), -1);
+    const DIRS = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [-1, 1], [1, -1], [1, 1]];
+    let head = 0, guard = 0;
+    while (head < q.length && guard++ < 30000) {
+      const [c, r] = q[head++];
+      if (c === tc && r === tr) break;
+      for (const [dc, dr] of DIRS) {
+        const nc = c + dc, nr = r + dr;
+        if (!this._walkable(nc, nr) || prev.has(key(nc, nr))) continue;
+        if (dc && dr && (!this._walkable(c + dc, r) || !this._walkable(c, r + dr))) continue; // 不穿墙角
+        prev.set(key(nc, nr), key(c, r)); q.push([nc, nr]);
+      }
+    }
+    if (!prev.has(key(tc, tr))) return null; // 不可达
+    const out = []; let k = key(tc, tr);
+    while (k !== -1 && k !== key(sc, sr)) { out.push({ col: k % W, row: (k - k % W) / W }); k = prev.get(k); }
+    return out.reverse();
+  }
+  // 世界坐标 → 全局像素 → 格子(矩形网格)。world = _gw(gx,gy) = (gx, -gy)。
+  _worldToTile(w) { return { col: Math.floor(w.x / TW), row: Math.floor(-w.y / TH) }; }
+  // 注册鼠标点击 → 拾取地面 → 设目标格
+  _installPointer() {
+    if (this._pointerInstalled) return; this._pointerInstalled = true;
+    this.scene.onPointerObservable.add((pi) => {
+      if (pi.type !== BABYLON.PointerEventTypes.POINTERPICK) return;
+      const p = pi.pickInfo; if (!p || !p.hit) return;
+      const { col, row } = this._worldToTile(p.pickedPoint);
+      this.moveTo(col, row);
+    });
+  }
+
+  // 决定本步方向: 键盘意图优先(可斜向), 否则沿鼠标寻路路径走下一格
+  _nextStepDir(e) {
+    if (this.intent.dc || this.intent.dr) return { dc: this.intent.dc, dr: this.intent.dr };
+    if (this.path && this.path.length) {
+      const next = this.path[0];
+      const dc = Math.sign(next.col - e.col), dr = Math.sign(next.row - e.row);
+      if (next.col === e.col && next.row === e.row) { this.path.shift(); return this._nextStepDir(e); }
+      return { dc, dr };
+    }
+    return { dc: 0, dr: 0 };
+  }
+  _setDir(e, dc, dr) { e.dir = dirOf(dc, dr); }
+  _beginStep(e, dc, dr) {
+    this._setDir(e, dc, dr);
+    const nc = e.col + dc, nr = e.row + dr;
+    if (!this._walkable(nc, nr)) { this.path = null; return false; } // 障碍/触边: 停步
+    e.fromCol = e.col; e.fromRow = e.row; e.toCol = nc; e.toRow = nr;
+    e.stepping = true; e.t0 = performance.now();
+    return true;
+  }
+
   start() {
-    this.scene.onBeforeRenderObservable.add(() => { for (const e of this.entities) e.animate(); });
+    const FRAME_MS = 45; // 序列帧推进间隔(独立于位移)
+    this.scene.onBeforeRenderObservable.add(() => {
+     try {
+      const now = performance.now();
+      const e = this.player;
+      this._updateBlocks(e ? e.col : this._focusCol, e ? e.row : this._focusRow); // 区块网格: 每帧载/卸1块
+      this._drainBuildQueue();            // 建筑限速创建(全局 BUILD_PER_FRAME/帧)
+      for (const o of this._others.values()) this._updateOther(o, now, FRAME_MS); // 其他玩家逐帧驱动
+      if (!e) return;
+      // 动画时钟: 按真实时间推进序列(cfpk 序列已编码姿势保持) —— 与位移解耦, 不卡帧
+      if (!e._lastNow) e._lastNow = now;
+      e.animClock += now - e._lastNow; e._lastNow = now;
+      while (e.animClock >= FRAME_MS) { e.animClock -= FRAME_MS; e.animIdx++; }
+
+      // 一次性动作(攻击/死亡): 播一遍, 期间不移动
+      if (e.oneShot) {
+        e.action = e.oneShot.action;
+        const seq = e.anim[e.action] && e.anim[e.action][e.dir];
+        const len = seq ? seq.length : 1;
+        let fr = e.animIdx - e.oneShot.start;
+        if (fr >= len) {
+          if (e.oneShot.hold) fr = len - 1;                 // 死亡: 定格末帧
+          else { e.oneShot = null; e.frameOverride = null; e.action = "stand"; e.animIdx = 0; } // 攻击: 回站立
+        }
+        if (e.oneShot) { e.frameOverride = Math.min(fr, len - 1); this._renderAt(e, e.col, e.row); return; }
+      }
+      e.frameOverride = null;
+
+      if (e.stepping) {
+        e.action = "move";
+        const p = Math.min(1, (now - e.t0) / e.stepMs);
+        const a = this._tileGTL(e.fromCol, e.fromRow), b = this._tileGTL(e.toCol, e.toRow);
+        const gx = a.x + (b.x - a.x) * p, gy = a.y + (b.y - a.y) * p;       // 逐帧像素插值(全局瓦片左上)
+        this._drawFrame(e, gx, gy);
+        this._camTo(gx + TW / 2, gy + TH / 2);                             // 相机平滑跟随
+        if (p >= 1) { e.col = e.toCol; e.row = e.toRow; e.stepping = false; this._awaitingMove = false; }
+      } else {
+        const { dc, dr } = this._nextStepDir(e);                            // 连续走: 一步接一步
+        if (dc || dr) {
+          if (this._netMove) {                                             // 服务器权威: 请求移动, 等确认
+            if (!this._awaitingMove) { e.dir = dirOf(dc, dr); this._awaitingMove = true; this._netMove(e.dir, e.col, e.row); }
+            this._renderAt(e, e.col, e.row);
+          } else { e.action = "move"; this._beginStep(e, dc, dr); this._renderAt(e, e.col, e.row); } // 本地模拟
+        } else { if (e.action !== "stand") { e.action = "stand"; e.animIdx = 0; } this._renderAt(e, e.col, e.row); }
+      }
+      this._updateWallTransparency(e.col, e.row);   // 走到墙后→墙半透明(透出角色)
+     } catch (err) { if (!this._loopErrLogged) { console.error("[render loop]", err); this._loopErrLogged = true; } } // 单帧异常不冻死全局
+    });
     this.engine.runRenderLoop(() => this.scene.render());
     return this;
   }

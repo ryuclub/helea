@@ -1,0 +1,115 @@
+// 天之炼狱(DarkEden) 地图(.map)解析器 —— 同构(DataView)
+//
+// 结构(依据客户端 ZoneFileHeader.cpp / MZone.cpp / MSector.cpp):
+//   MString ZoneVersion        (u32 len + bytes; "=MAP_2000_05_10=")
+//   u16 ZoneID, u16 ZoneGroupID
+//   MString ZoneName           (u32 len + bytes)
+//   u8 ZoneType, u8 ZoneLevel   (老地图可能是 u16，靠描述长度合理性探测)
+//   MString Description        (u32 len + bytes)
+//   u32 fpTile, u32 fpImageObject   (文件内偏移指针)
+//   u16 Width, u16 Height
+//   Sector[Height*Width]: u16 spriteID, u8 property, u8 light   (每格 4 字节)
+//
+// Sector.property 位标志(MSector.h):
+export const SECTOR = {
+  BLOCK_UNDERGROUND: 0x01,
+  BLOCK_GROUND: 0x02,
+  BLOCK_FLYING: 0x04,
+  ITEM: 0x08,
+  UNDERGROUNDCREATURE: 0x10,
+  GROUNDCREATURE: 0x20,
+  FLYINGCREATURE: 0x40,
+  PORTAL: 0x80,
+};
+
+function asView(buf) {
+  if (buf instanceof DataView) return buf;
+  if (buf instanceof ArrayBuffer) return new DataView(buf);
+  return new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+}
+
+export function parseMap(buf) {
+  const dv = asView(buf);
+  let p = 0;
+  const readStr = () => {
+    const len = dv.getUint32(p, true); p += 4;
+    let s = "";
+    for (let i = 0; i < len; i++) s += String.fromCharCode(dv.getUint8(p + i));
+    p += len;
+    return s;
+  };
+
+  const version = readStr();
+  const zoneID = dv.getUint16(p, true); p += 2;
+  const zoneGroupID = dv.getUint16(p, true); p += 2;
+  const zoneName = readStr();
+
+  // ZoneType/ZoneLevel: 先按 u8 试，若随后的描述长度不合理则回退 u16
+  const afterName = p;
+  const tryLayout = (typeBytes) => {
+    let q = afterName + typeBytes * 2;
+    const dlen = dv.getUint32(q, true);
+    return dlen <= 65536 ? dlen : -1;
+  };
+  let typeBytes = 1;
+  if (tryLayout(1) < 0 && tryLayout(2) >= 0) typeBytes = 2;
+  const zoneType = dv.getUint8(p); p += typeBytes;
+  const zoneLevel = dv.getUint8(p); p += typeBytes; // 仅取低字节
+  const description = readStr();
+
+  const fpTile = dv.getUint32(p, true); p += 4;
+  const fpImageObject = dv.getUint32(p, true); p += 4;
+  const width = dv.getUint16(p, true); p += 2;
+  const height = dv.getUint16(p, true); p += 2;
+
+  // 扇区网格(行优先: height 行 × width 列)
+  const sectorBase = p;
+  const spriteID = new Uint16Array(width * height);
+  const property = new Uint8Array(width * height);
+  const light = new Uint8Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    spriteID[i] = dv.getUint16(p, true); p += 2;
+    property[i] = dv.getUint8(p); p += 1;
+    light[i] = dv.getUint8(p); p += 1;
+  }
+
+  return {
+    version, zoneID, zoneGroupID, zoneName, zoneType, zoneLevel, description,
+    fpTile, fpImageObject, width, height,
+    spriteID, property, light,
+    sectorBase, imageObjectEnd: p,
+  };
+}
+
+// 解析 ImageObject(建筑/物件)层。紧跟 sector 数据(map.imageObjectEnd)。
+// 类型: 3=IMAGEOBJECT 4=SHADOW 5=ANIMATION 6=SHADOWANIMATION 7=INTERACTION
+// 基类 MImageObject(18B): u32 id,u16 spriteID,i32 pixelX,i32 pixelY,u16 viewpoint,u8 bAnim,u8 bTrans
+// ANIMATION 追加: u16 frameID+u8 maxFrame + u8 blt,dir,soundFrame + u16 soundID + ShowTimeChecker(11)
+// INTERACTION 追加: + u8 interactionType
+// 随后 PositionList: u16 size + size×{u16 X,u16 Y}
+export function parseImageObjects(buf, map) {
+  const dv = asView(buf);
+  let p = map.imageObjectEnd;
+  const count = dv.getUint32(p, true); p += 4;
+  const objs = [];
+  for (let i = 0; i < count; i++) {
+    const type = dv.getUint8(p); p += 1;
+    if (type < 3 || type > 7) return { count, objs, ok: false, error: `坏类型 ${type} @obj ${i} off ${p}` };
+    // MObject::LoadFromFile 基类(9B): ObjectType(1)+ID(4)+X(2)+Y(2) —— MImageObject::LoadFromFile 先调它
+    p += 1 + 4 + 2 + 2;
+    const id = dv.getUint32(p, true); p += 4;       // m_ImageObjectID
+    const spriteID = dv.getUint16(p, true); p += 2;
+    const pixelX = dv.getInt32(p, true); p += 4;
+    const pixelY = dv.getInt32(p, true); p += 4;
+    const viewpoint = dv.getUint16(p, true); p += 2;
+    const bAnim = dv.getUint8(p); p += 1;
+    const bTrans = dv.getUint8(p); p += 1;
+    if (type === 5 || type === 6 || type === 7) { p += 3; p += 5; p += 11; } // CAnimFrame + 5B + ShowTimeChecker
+    if (type === 7) p += 2; // m_InteractionObjectType = unsigned short(2字节)! 开源 MInteractionObject.cpp:74。
+    // ⚠ 曾误写 1 字节 → 地图里只要有一个 type7(传送/交互, 地牢常见)其后所有物件整体错位1字节 → 建筑层崩坏(地牢错乱真因)。
+    const plen = dv.getUint16(p, true); p += 2;
+    p += plen * 4;
+    objs.push({ type, id, spriteID, pixelX, pixelY, viewpoint, bAnim, bTrans });
+  }
+  return { count, objs, ok: true, end: p, total: buf.length ?? buf.byteLength };
+}

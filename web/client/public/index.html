@@ -2,19 +2,29 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8" />
-<title>天之炼狱 Web 客户端 · Babylon 引擎</title>
+<title>天之炼狱 Web 客户端 · Babylon + 真实地形</title>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: #0c0c10; color: #ddd; font-family: system-ui, sans-serif; }
   body { display: flex; }
   #game { flex: 1; position: relative; }
-  #cv { width: 100%; height: 100vh; display: block; outline: none; }
-  #title { position: absolute; left: 14px; top: 12px; font-size: 14px; color: #cde;
-           background: rgba(0,0,0,.4); padding: 6px 10px; border-radius: 6px; }
+  #cv { width: 100%; height: 100vh; display: block; }
+  #uiScreen { position: absolute; inset: 0; z-index: 30; background: #000; overflow: hidden; }
+  /* 换区转场: 抓旧画面盖住(无黑屏)→ 加载久(>450ms)才浮出 spinner(表示在载入,非卡死)→ 新区就绪淡出露出新场景 */
+  #zoneFade { position: absolute; inset: 0; z-index: 25; display: none; background: #000 center/100% 100% no-repeat; opacity: 0; transition: opacity .45s ease; pointer-events: none; }
+  #zoneFade .veil { position: absolute; inset: 0; background: rgba(6,6,12,.5); opacity: 0; transition: opacity .35s ease; }
+  #zoneFade .spin { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -30px 0 0 -23px; border: 4px solid rgba(255,255,255,.16); border-top-color: #c33; border-radius: 50%; opacity: 0; transition: opacity .35s ease; animation: zspin .8s linear infinite; }
+  #zoneFade .tip { position: absolute; left: 0; right: 0; top: 50%; margin-top: 28px; text-align: center; color: #cbb; font-size: 13px; letter-spacing: 3px; opacity: 0; transition: opacity .35s ease; }
+  #zoneFade.busy .veil, #zoneFade.busy .spin, #zoneFade.busy .tip { opacity: 1; }
+  @keyframes zspin { to { transform: rotate(360deg); } }
+  #title { position: absolute; left: 14px; top: 12px; font-size: 14px; color: #cde; background: rgba(0,0,0,.45); padding: 6px 10px; border-radius: 6px; }
+  #toggleSide { position: absolute; right: 10px; top: 10px; z-index: 20; background: rgba(0,0,0,.6); color: #cde; font-weight: 600; padding: 7px 11px; }
+  #side.hidden { display: none; }
   #side { width: 320px; padding: 16px; overflow-y: auto; border-left: 1px solid #1c1c22; }
   h1 { font-size: 15px; margin: 0 0 4px; } .sub { font-size: 12px; color: #888; margin-bottom: 12px; }
   button { background: #2b6; color: #021; border: 0; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; }
   button:disabled { background: #444; color: #888; cursor: default; }
+  input.f { width: 100%; margin: 6px 0; padding: 7px 9px; background: #15151c; border: 1px solid #2a2a33; border-radius: 6px; color: #ddd; font-size: 13px; }
   #stat { margin: 12px 0; font-size: 12px; color: #9af; }
   #log { font: 12px/1.6 ui-monospace, monospace; }
   .l { padding: 2px 0; border-bottom: 1px solid #18181e; }
@@ -22,101 +32,521 @@
 </style>
 </head>
 <body>
-<div id="game"><canvas id="cv"></canvas><div id="title">天之炼狱 · Babylon 引擎底座</div></div>
+<div id="game"><canvas id="cv"></canvas><div id="title">天之炼狱 · Adam 城(真实地形)</div><button id="toggleSide">☰ 面板</button>
+  <div id="zoneFade"><div class="veil"></div><div class="spin"></div><div class="tip">加载中…</div></div>
+  <div id="uiScreen"></div>
+</div>
 <div id="side">
   <h1>天之炼狱 (DarkEden) · Web 客户端</h1>
-  <div class="sub">Babylon 正式引擎 + 真实登录流</div>
-  <button id="go">连接并登录 (111111)</button>
+  <div class="sub">Babylon 引擎 · 真实注册 / 建角色 / 登录流</div>
+  <!-- 登录已由开源 Login.spk 界面(覆盖层 #uiScreen)忠实接管; 旧侧栏表单保留隐藏作调试回退 -->
+  <div id="auth" style="display:none">
+    <input id="acc" class="f" placeholder="账号(4~10 位字母或数字)" autocomplete="off" />
+    <input id="pw" class="f" type="password" placeholder="密码(6~10 位)" autocomplete="off" />
+    <div style="display:flex;gap:8px;margin-top:4px">
+      <button id="go" style="flex:1">登录</button>
+      <button id="reg" style="flex:1;background:#46c;color:#fff">注册</button>
+    </div>
+  </div>
+  <div id="pclist" style="display:none">
+    <div class="sub" style="margin-top:10px;color:#8c8">选择角色(服务端角色列表)：</div>
+  </div>
+  <div id="create" style="display:none">
+    <div class="sub" style="margin-top:10px;color:#cc8">创建新角色：</div>
+    <input id="cname" class="f" placeholder="角色名(字母或数字)" autocomplete="off" />
+    <select id="crace" class="f"><option value="0">Slayer 屠夫</option><option value="1">Vampire 吸血鬼</option><option value="2">Ousters 魔灵</option></select>
+    <select id="csex" class="f"><option value="0">男</option><option value="1">女</option></select>
+    <button id="docreate" style="width:100%">创建角色并进入</button>
+  </div>
   <div id="stat"></div>
+  <input id="chat" class="f" placeholder="聊天: 回车发送(进入游戏后)" autocomplete="off" />
   <div id="log"></div>
 </div>
 
 <script src="/public/vendor/babylon.js"></script>
 <script type="module">
 import { GameRenderer } from "../src/render.js";
-import { decodePack, decodeCIndexSprite } from "../src/spk.js";
-import { encCLLogin, encCLGetPCList, encCLSelectPC, encCGConnect, decode, Framer } from "../src/proto.js";
+import { parseCFPK, getActionSeqs } from "../src/cfpk.js";
+import { loadSpritesById, fetchBuf } from "../src/pack.js";
+import { RACE_SPRITE_PACK, raceActions, raceFrameID } from "../src/creature-anim.js";
+import { initTerrain, buildBlock, buildZoneObjects } from "../src/terrain.js";
+import { LoginScreen } from "../src/ui-login.js";
+import { CharSelectScreen } from "../src/ui-charselect.js";
+import { CharCreateScreen } from "../src/ui-charcreate.js";
+import { HudHpBar } from "../src/ui-hud.js";
+import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCGConnect, encCGReady, encCGMove, encCGSay,
+  resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 
 const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
 const log = (m, c = "") => { const d = document.createElement("div"); d.className = "l " + c; d.textContent = m; logEl.prepend(d); };
+// 种族 ↔ pcType(PC_SLAYER=0/VAMPIRE=1/OUSTERS=2)。
+const RACE_NAMES = ["slayer", "vampire", "ousters"];
+const raceType = (race) => Math.max(0, RACE_NAMES.indexOf(race));
+let curAccount = null, PC_NAME = null, myRace = "slayer", mySex = 0;     // 自己角色的种族/性别
+let pendingName = null, pendingRace = "slayer", pendingSex = 0, pendingSlot = 0; // 建角色暂存(含选定空槽)
+// 各族新手出生区(决定 in-world 加密 code; code 必须匹配真实 zone, 否则移动包解密成乱码→服务端越界崩溃)。
+// slayer→12(eslania_NW, code28), vampire→1003(code248), ousters→1311(code10)。后续应从 GC_UPDATE_INFO 读真实 zone。
+const RACE_START_ZONE = { slayer: 12, vampire: 1003, ousters: 1311 };
+const ZONE_ID = 12;                            // 新建及预制角色均出生 zone12(eslania_NW); 加密 code=EncryptCode(zoneID,0)
+// 网关 WS 地址: https(隧道外网)走同源 wss://host/ws; http(本机/局域网)走 ws://host:8080。
+// 网关只读 query(host/port), 忽略路径, 故隧道下 /ws?host=...&port=... 同样工作。
+const gwURL = (port) => location.protocol === "https:"
+  ? `wss://${location.host}/ws?host=127.0.0.1&port=${port}`
+  : `ws://${location.hostname}:8080/?host=127.0.0.1&port=${port}`;
+let SPAWN_COL = 103, SPAWN_ROW = 128;          // 占位; 真实出生由服务器 GC_SET_POSITION 给出
 
-// 账号 111111 Slayer SLOT1 角色名(DB 原始字节)
-const PC_NAME = Uint8Array.from("B2BBD4D9D1DACACE".match(/../g).map((h) => parseInt(h, 16)));
-
-// ---- 引擎底座 ----
-const renderer = new GameRenderer(document.getElementById("cv")).buildScene().addGround(6, 6).start();
+const renderer = new GameRenderer(document.getElementById("cv")).buildScene().setZoom(1.4).start();
 window.__renderer = renderer;
+renderer.onLog = (m) => log(m, "info");                 // 重建各段耗时上报到日志
+// 大帧间隔(卡顿)探测: 任何 >120ms 的帧都打到日志, 直接看真机冻结时长
+let __last = performance.now();
+(function gap() { const n = performance.now(); const d = n - __last; __last = n; if (d > 120) log(`⚠ 卡顿帧 ${d | 0}ms`, "err"); requestAnimationFrame(gap); })();
 
-// 预解码角色帧(P3)
-let heroFrames = null;
-(async () => {
+// 移动(客户端本地, 相机平滑跟随): 键盘按住连续走(↑↓←→/WASD, 支持斜向); 鼠标点击地面走过去。
+const KEY = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
+  w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0] };
+const held = new Set();
+function applyIntent() {
+  let dc = 0, dr = 0;
+  for (const k of held) { const m = KEY[k]; if (m) { dc += m[0]; dr += m[1]; } }
+  renderer.setIntent(Math.sign(dc), Math.sign(dr));
+}
+const chatEl = document.getElementById("chat");
+addEventListener("keydown", (e) => {
+  if (document.activeElement === chatEl) return;            // 聊天输入时不触发移动/动作
+  if (!window.__player) return;
+  if (e.key === " ") { e.preventDefault(); renderer.playAction("attack"); return; }      // 空格 = 攻击
+  if (e.key === "k" || e.key === "K") { e.preventDefault(); renderer.playAction("die", true); return; } // K = 死亡
+  if (!KEY[e.key]) return; e.preventDefault(); held.add(e.key); applyIntent();
+});
+addEventListener("keyup", (e) => { if (!KEY[e.key]) return; held.delete(e.key); applyIntent(); });
+// 聊天发送(回车): 经 gameserver 连接发 CG_SAY; 自己的话本地立即显示
+chatEl.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  const msg = chatEl.value.trim(); chatEl.value = "";
+  if (!msg) return;
+  if (gws && gws.readyState === 1) { gws.send(encCGSay(msg)); log(`你: ${msg}`, "ok"); }
+  else log("(未进入游戏, 无法发言)", "err");
+});
+
+// zoneID → 地图文件名(从 DB ZoneInfo 生成, 148 区)。换区时按真实 zone 加载对应地图。
+let ZONEMAP = {};
+(async () => { try { ZONEMAP = await (await fetch("/public/assets/zonemap.json")).json(); } catch (e) { log("zonemap 加载失败: " + e.message, "err"); } })();
+let curZone = null, terrainMapName = null;
+// 换区转场(几乎无黑屏, 视觉=旧界面淡出/新界面淡入): 换区瞬间抓取旧画面截图盖在最上层(瞬时, 冻住旧场景),
+// 在其底下静默清旧区/载新区, 新区就绪后把这张旧截图淡出 → 露出新场景。token 防快速连换时旧淡出误盖新一轮。
+let _fadeToken = 0, _busyTimer = 0;
+function coverWithOldFrame() {
+  _fadeToken++; const tok = _fadeToken;
+  const el = $("zoneFade");
+  try {                                                    // 抓当前(旧)画面盖住; canvas 开了 preserveDrawingBuffer
+    el.style.backgroundImage = `url(${$("cv").toDataURL()})`; el.style.backgroundColor = "#000";
+  } catch { el.style.backgroundImage = "none"; el.style.backgroundColor = "#000"; } // 抓取失败回退黑幕
+  el.classList.remove("busy");
+  el.style.transition = "none";                            // 立即盖住(无淡入), 看起来就是旧画面没动
+  el.style.display = "block"; el.style.opacity = "1";
+  void el.offsetWidth;                                     // 重排固化, 再恢复过渡供之后淡出
+  el.style.transition = "opacity .45s ease";
+  clearTimeout(_busyTimer);                                // 加载超 450ms 才浮出 spinner(短转场不打扰; 解码已分片故能转)
+  _busyTimer = setTimeout(() => { if (tok === _fadeToken) el.classList.add("busy"); }, 450);
+}
+function fadeInWhenReady() {
+  const tok = _fadeToken, t0 = performance.now();
+  const tick = () => {
+    if (tok !== _fadeToken) return;                        // 又换区了 → 交给新一轮
+    // 新区中心块已渲染(+短暂沉淀让附近物件补齐)才淡出旧截图; 8s 兜底。
+    if ((renderer.isFocusBlockReady() && performance.now() - t0 > 150) || performance.now() - t0 > 8000) {
+      clearTimeout(_busyTimer);
+      const el = $("zoneFade"); el.classList.remove("busy"); el.style.opacity = "0";
+      setTimeout(() => { if (tok === _fadeToken) { el.style.display = "none"; el.style.backgroundImage = "none"; } }, 480);
+      return;
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+// 按 zoneID 加载对应地图(换图: tile/obj 全局库, 仅 .map 不同)。zone 变了则清旧区块再载。
+async function initTerrainForZone(zoneID, fx, fy) {
+  const mapName = ZONEMAP[zoneID] || "eslania_NW";
+  if (terrainMapName === mapName) { renderer.setFocus(fx, fy); return; }
+  if (terrainMapName !== null) { coverWithOldFrame(); renderer.clearBlocks(); }  // 换区: 用旧画面截图盖住(冻住旧场景), 再清旧区+载新区
+  const t0 = performance.now();
+  const map = await initTerrain({ mapUrl: `/public/assets/map/${mapName}.map`, tileBase: "/public/assets/tile", objBase: "/public/assets/obj" });
+  renderer.setMap(map).setBlockLoader(buildBlock).setFocus(fx, fy);
+  // 物件整区常驻(对齐开源 MTopView): 进区一次性载入本 zone 全部物件, 按 viewpoint 画家序绘制,
+  // 绝不按块分桶/加载半径丢弃 → 杜绝"该有物件却黑洞"。
+  renderer.loadZoneObjects(await buildZoneObjects());
+  terrainMapName = mapName;
+  log(`地形就绪: ${mapName}(zone${zoneID}) ${map.width}x${map.height} (${(performance.now() - t0 | 0)}ms)`, "ok");
+}
+
+// 三族角色资源(按 race+sex 加载对应进阶精灵包 + 重映射动作下标), 带缓存。复刻开源客户端逻辑。
+// race: "slayer"|"vampire"|"ousters"; sex: 0 男 / 1 女。返回 {frames, anim}。
+const _raceAssetCache = new Map();
+async function buildRaceAssets(race, sex) {
+  const pack = (RACE_SPRITE_PACK[race] || RACE_SPRITE_PACK.slayer)[sex] ?? (RACE_SPRITE_PACK[race] || RACE_SPRITE_PACK.slayer)[0];
+  const key = pack;
+  if (_raceAssetCache.has(key)) return _raceAssetCache.get(key);
+  const acts = raceActions(race);   // {stand,move,attack,die} = cfpk 动作下标(开源 AC 重映射)
+  const fid = raceFrameID(race);    // cfpk 第一维(身体所在 FrameID/coat): slayer/vampire 0, ousters 1
+  const cfpk = parseCFPK(await fetchBuf(`/public/assets/${pack}.cfpk`));
+  const anim = { stand: getActionSeqs(cfpk, fid, acts.stand), move: getActionSeqs(cfpk, fid, acts.move),
+    attack: getActionSeqs(cfpk, fid, acts.attack), die: getActionSeqs(cfpk, fid, acts.die) };
+  const ids = new Set();
+  for (const seqs of [anim.stand, anim.move, anim.attack, anim.die]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
+  const frames = await loadSpritesById(`/public/assets/${pack}.ispk`, 64, [...ids]);
+  // 校验: 站立帧必须有有效精灵, 否则视为加载不完整 → 抛错(绝不缓存坏资源, 否则永久不可见)。
+  const ok = anim.stand && anim.stand.some((dir) => dir.some((fr) => frames[fr.s]));
+  if (!ok) throw new Error(`角色精灵不完整: ${pack}`);
+  const out = { frames, anim };
+  _raceAssetCache.set(key, out);
+  log(`角色资源就绪: ${pack} (${ids.size} 精灵, stand${acts.stand}/move${acts.move})`, "info");
+  return out;
+}
+
+let player = null, gws = null, placing = false, pendingPlace = null;
+// 服务器告知真实坐标(入世/换区/传送落点): 加载该 zone 地图 → 首次生成角色/之后重定位。
+// ⚠ 换区是异步(地形要 fetch+建块), 而快速连续换区(地牢逐层进出)会连发多个 GC_UPDATE_INFO/SET_POSITION。
+// 旧实现 `if(placing)return` 会**丢弃**后续换区 → 角色没放到新图、新旧地块混杂。改为"最新目标胜出":
+// 加载中再来请求只记下最新目标, 当前加载完接着处理它; 加载途中目标又变则跳过本次定位、重载最新。
+async function placePlayerAt(x, y) {
+  pendingPlace = { x, y, zone: curZone || (RACE_START_ZONE[myRace] || 12) };
+  if (placing) return;                                       // 已有加载循环在跑, 它会接手最新 pendingPlace
+  placing = true;
   try {
-    const buf = new Uint8Array(await (await fetch("/public/assets/slayerman00.ispk")).arrayBuffer());
-    heroFrames = decodePack(buf, decodeCIndexSprite, 12);
-    log(`角色资源就绪: ${heroFrames.length} 帧`, "info");
-  } catch (e) { log("角色资源失败: " + e.message, "err"); }
-})();
-
-let player = null;
-function spawnPlayer() {
-  if (player || !heroFrames) return;
-  player = renderer.spawn({ id: "player", col: 2, row: 3 }).setBillboard(heroFrames, { dirCount: 3, framesPerDir: 4 });
-  window.__player = player;
-  log("角色已进入场景(2D billboard)", "ok");
+    while (pendingPlace) {
+      const t = pendingPlace; pendingPlace = null;
+      await initTerrainForZone(t.zone, t.x, t.y);            // 按 zone 加载/换图(同图名早返回, 不同则清旧载新)
+      if (pendingPlace) continue;                            // 加载期间又来新换区 → 本次定位作废, 去处理最新
+      if (!player) {
+        const { frames, anim } = await buildRaceAssets(myRace, mySex);
+        if (pendingPlace) continue;                          // 资源加载期间又换区 → 重来
+        SPAWN_COL = t.x; SPAWN_ROW = t.y;
+        player = renderer.spawnSprite(frames, t.x, t.y, anim);
+        window.__player = player;
+        renderer.setNetMove((dir, cx, cy) => { if (gws && gws.readyState === 1) gws.send(encCGMove({ dir, x: cx, y: cy })); });
+        log(`角色已站入 zone${t.zone} (${t.x},${t.y}) · ${myRace}${mySex ? "(女)" : "(男)"} · 服务器权威移动`, "ok");
+      } else {
+        renderer.placePlayer(t.x, t.y);                      // 换区/传送落点: 重定位现有角色到新图
+        log(`到达 zone${t.zone} (${t.x},${t.y})`, "ok");
+      }
+      renderer.markZoneReady();   // 新区地图+物件+玩家全部就位 → 开启地砖流式(换区原子门, 防旧区污染)
+      fadeInWhenReady();          // 新区中心块渲染好 → 淡出黑幕露出新场景
+      reconnectTries = 0;
+    }
+  } catch (e) {
+    player = null; log("角色/地形加载失败, 即将重试: " + e.message, "err");
+    placing = false;
+    if (gws && gws.readyState === 1) setTimeout(() => placePlayerAt(x, y), 800);
+    return;
+  }
+  finally { placing = false; }
 }
 
-// ---- 真实登录流 ----
-document.getElementById("go").onclick = () => {
-  document.getElementById("go").disabled = true;
-  log("连接网关 ws://127.0.0.1:8080 …", "info");
-  const ws = new WebSocket("ws://127.0.0.1:8080/?host=127.0.0.1&port=9999");
-  ws.binaryType = "arraybuffer";
-  const framer = new Framer((pkt) => onPacket(decode(pkt), ws));
-  ws.onmessage = (e) => framer.push(new Uint8Array(e.data));
-  ws.onopen = () => { log("已连接 → CL_LOGIN", "ok"); ws.send(encCLLogin({ id: "111111", password: "111111" })); };
-  ws.onerror = () => log("连接错误(网关/服务端在跑?)", "err");
-  ws.onclose = () => log("连接关闭", "info");
-};
-
-function onPacket(p, ws) {
-  if (p.name === "LC_LOGIN_OK") { log(`◀ LC_LOGIN_OK → 请求角色列表`, "ok"); ws.send(encCLGetPCList()); }
-  else if (p.name === "LC_LOGIN_ERROR") { log(`◀ LC_LOGIN_ERROR code=${p.errorID}`, "err"); }
-  else if (p.name === "LC_PC_LIST") { log(`◀ LC_PC_LIST(${p.size}B) → 选 Slayer`, "ok"); ws.send(encCLSelectPC({ pcName: PC_NAME, pcType: 0 })); }
-  else if (p.name === "LC_RECONNECT") {
-    log(`◀ LC_RECONNECT → 移交游戏服 ${p.gameServerIP}:${p.gameServerPort}`, "ok");
-    statEl.innerHTML = `已移交游戏服 ${p.gameServerIP}:${p.gameServerPort}<br>连接 gameserver…`;
-    ws.close(); // loginserver 任务完成
-    connectGame(p);
-  } else { log(`◀ ${p.name}(${p.size}B)`, ""); }
+// 其他玩家进入视野: 按其种族/性别加载对应精灵(带缓存), 复用同一渲染管线。
+async function addOtherPlayer(c) {
+  if (!c || c.name === myCharName) return;                   // 跳过自己
+  try {
+    const { frames, anim } = await buildRaceAssets(c.race, c.sex || 0);
+    renderer.addOther(c.objectID, frames, c.x, c.y, c.dir, anim);
+    log(`▶ 其他玩家进入视野: ${c.name} #${c.objectID} (${c.race}, ${c.x},${c.y})`, "ok");
+  } catch (e) { log("其他玩家资源加载失败: " + e.message, "err"); }
 }
 
-// ---- 第二段: 连 gameserver, CG_CONNECT 入世 ----
-function connectGame(rc) {
-  const port = rc.gameServerPort || 9998;
-  log(`连接 gameserver(网关→${port}) …`, "info");
-  const gws = new WebSocket(`ws://127.0.0.1:8080/?host=127.0.0.1&port=${port}`);
+// 连到 gameserver, 走 CGConnect→CG_READY, 入世
+let deliberateClose = false, reconnectTries = 0;
+function connectGame(ip, port, key) {
+  resetGameSeq();                                            // gameserver 连接序列号归零
+  placing = false;                                           // 重连时清掉可能卡住的占位
+  gws = new WebSocket(gwURL(port));
   gws.binaryType = "arraybuffer";
   const framer = new Framer((pkt) => onGamePacket(decode(pkt)));
   gws.onmessage = (e) => framer.push(new Uint8Array(e.data));
-  gws.onopen = () => {
-    log("gameserver 已连 → CG_CONNECT(携带 key)", "ok");
-    gws.send(encCGConnect({ key: rc.key, pcName: PC_NAME, pcType: 0 }));
-  };
+  gws.onopen = () => { log("→ gameserver CGConnect", "ok"); gws.send(encCGConnect({ key, pcName: PC_NAME, pcType: raceType(myRace) })); };
+  gws.onclose = () => { log("gameserver 连接关闭", "info"); maybeReconnect(); };
   gws.onerror = () => log("gameserver 连接错误", "err");
-  window.__gws = gws;
 }
-
+// 意外断开自动重连(服务端瞬时崩重启/网络抖动→不再永久卡死)。退避重试, 多次失败提示手动刷新。
+function maybeReconnect() {
+  if (deliberateClose || !window.__entered) return;         // 主动关闭或尚未入世: 不重连
+  if (reconnectTries >= 6) { log("自动重连多次失败, 请手动刷新页面", "err"); statEl.innerHTML = "⚠ 连接中断, 请刷新"; return; }
+  reconnectTries++;
+  const delay = Math.min(1500 + reconnectTries * 1200, 6000);
+  log(`连接中断 → ${(delay / 1000) | 0}s 后自动重连(第 ${reconnectTries} 次)…`, "info");
+  statEl.innerHTML = `⏳ 重连中(${reconnectTries})…`;
+  renderer.clearOthers();                                    // 旧他人 objectID 失效, 清掉
+  setTimeout(() => { if (!deliberateClose) connectLogin(); }, delay);
+}
+// HP/MP 状态(协议忠实解析并维护) + 开源血法条 HUD(HPBar<Race>.spk)。
+const hpmp = { hp: 0, hpMax: 1, mp: 0, mpMax: 1 };
+let hudBar = null, hudLoading = false;
+function updateHud() {
+  if (!hudBar && !hudLoading && myRace) {        // 首次(入世后): 按本族加载真实血条美术
+    hudLoading = true;
+    hudBar = new HudHpBar($("game"));
+    hudBar.load(myRace).then(() => hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax)).catch((e) => { log("HUD 加载失败: " + e.message, "err"); hudBar = null; });
+  } else if (hudBar) hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax);
+}
 function onGamePacket(p) {
   if (p.name === "GC_UPDATE_INFO") {
-    log(`◀ GC_UPDATE_INFO(${p.size}B) —— 服务端下发角色数据`, "ok");
-    statEl.innerHTML = `✅ 已真正进入游戏世界<br>gameserver 已确认 · 角色: Slayer`;
-    spawnPlayer();
-    window.__entered = true;
-  } else if (p.name === "GC_DISCONNECT") {
-    log(`◀ GC_DISCONNECT —— 被游戏服拒绝`, "err");
-  } else {
-    log(`◀ ${p.name}(${p.size}B)`, "");
+    if (p.curHP !== undefined) { hpmp.hp = p.curHP; hpmp.hpMax = p.maxHP || 1; hpmp.mp = p.curMP; hpmp.mpMax = p.maxMP || 1; updateHud(); }
+    // 真实 zone: 从包解析(三族均对真实包核对)。决定加密 code + 加载哪张图(含传送换区)。
+    const parsed = (p.zoneID && ZONEMAP[p.zoneID]) ? p.zoneID : null;
+    if (parsed === null && player) {
+      // 已在世却解析不出新 zone(极少见: 解析异常): 用错 code 会崩服 → 主动断开, 不自动重连(避免循环)。
+      log("⚠ 无法解析新区域, 已断开以避免错误, 请手动刷新重进", "err");
+      statEl.innerHTML = "⚠ 区域解析失败, 请刷新"; deliberateClose = true; gws.close(); return;
+    }
+    const z = parsed || (RACE_START_ZONE[myRace] || 12);
+    const tx = (p.zoneX ?? SPAWN_COL), ty = (p.zoneY ?? SPAWN_ROW);  // 换区临时落点(开源 SetX/Y(zoneX,zoneY))
+    curZone = z;
+    setEncryptCode(calcEncryptCode(z, 0));
+    log(`◀ GC_UPDATE_INFO 原始zoneID=${p.zoneID} → zone${z}(${tx},${ty})${parsed ? "" : "(不在ZONEMAP→回退!)"} 图=${ZONEMAP[z] || "?"} code${calcEncryptCode(z, 0)}`, parsed ? "ok" : "err");
+    // 开源标准: GC_UPDATE_INFO 即 MoveZone —— 先卸旧图载新图(用临时坐标 zoneX/zoneY 落位/聚焦),
+    // 图就绪后才发 CGReady(服务器随后才发 GC_SET_POSITION 定最终位置)。地形重载绝不放到 SET_POSITION。
+    placePlayerAt(tx, ty).then(() => { if (gws && gws.readyState === 1) gws.send(encCGReady()); });
   }
+  // 开源 InitPlayer: 只在已载好的新图上把角色定位到最终坐标(不重载地形, 同 zone 早返回)。
+  else if (p.name === "GC_SET_POSITION") { log(`◀ GC_SET_POSITION (${p.x},${p.y})`, "ok"); placePlayerAt(p.x, p.y); }
+  else if (p.name === "GC_MOVE_OK") { renderer.serverStep(p.x, p.y, p.dir); }
+  else if (p.name === "GC_MOVE_ERROR") { renderer.serverReject(p.x, p.y); }
+  else if (p.name === "GC_SAY") { log(`玩家#${p.objectID}: ${p.message}`, "info"); } // 附近玩家聊天
+  else if (p.name === "GC_MODIFY_INFORMATION") { // HP/MP 等属性变化(type 12~15): 维护状态, 显示待真实 gauge
+    if (p.mods) { for (const m of p.mods) { if (m.type === 12) hpmp.hp = m.value; else if (m.type === 13) hpmp.hpMax = m.value; else if (m.type === 14) hpmp.mp = m.value; else if (m.type === 15) hpmp.mpMax = m.value; } updateHud(); }
+  }
+  // ── 其他玩家可见(三族, 各自精灵包) ──
+  else if (p.name === "GC_ADD_SLAYER" || p.name === "GC_ADD_VAMPIRE" || p.name === "GC_ADD_OUSTERS") { addOtherPlayer(p.creature); }
+  else if (p.name === "GC_MOVE") { renderer.otherStep(p.objectID, p.x, p.y, p.dir); }   // 他人移动
+  else if (p.name === "GC_DELETE_OBJECT") { renderer.removeOther(p.objectID); }          // 他人离开视野
+}
+
+// ───── 注册 / 登录 / 建角色 流程 ─────
+let loginWS = null, myCharName = "";
+const $ = (id) => document.getElementById(id);
+const accEl = $("acc"), pwEl = $("pw");
+accEl.value = localStorage.getItem("lastAccount") || "";   // 记住上次账号
+
+// 侧栏显隐(手机上腾出游戏画面)。切换后触发 resize 让 Babylon 重算画布尺寸。
+$("toggleSide").onclick = () => {
+  $("side").classList.toggle("hidden");
+  setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
+};
+
+// 注册(1-A): 调后端 /api/register 建空号(角色由 CL_CREATE_PC 真协议创建)。
+async function registerAccount(id, password) {
+  if (!/^[A-Za-z0-9]{4,10}$/.test(id || "")) { log("账号需 4~10 位字母或数字", "err"); return false; }
+  if (!/^[A-Za-z0-9]{6,10}$/.test(password || "")) { log("密码需 6~10 位字母或数字", "err"); return false; }
+  try {
+    const r = await fetch("/api/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, password }) });
+    const j = await r.json();
+    if (j.ok) { log(`✅ 注册成功: ${id} —— 点「确定」登录并创建角色`, "ok"); return true; }
+    log("注册失败: " + j.error, "err"); return false;
+  } catch (e) { log("注册请求失败: " + e.message, "err"); return false; }
+}
+$("reg").onclick = async () => { $("reg").disabled = true; await registerAccount(accEl.value.trim(), pwEl.value); $("reg").disabled = false; };
+
+// 连 loginserver 走登录流程(按钮 + 自动重连共用)。
+let curPassword = null;
+function connectLogin() {
+  log("连接网关 → loginserver …", "info");
+  loginWS = new WebSocket(gwURL(9999));
+  loginWS.binaryType = "arraybuffer";
+  const framer = new Framer((pkt) => onPacket(decode(pkt)));
+  loginWS.onmessage = (e) => framer.push(new Uint8Array(e.data));
+  loginWS.onopen = () => { log(`已连接 → CL_LOGIN(${curAccount})`, "ok"); loginWS.send(encCLLogin({ id: curAccount, password: curPassword })); };
+  loginWS.onerror = () => { log("登录连接错误", "err"); $("go").disabled = false; $("reg").disabled = false; };
+  loginWS.onclose = () => log("登录连接关闭", "info");
+}
+// 登录按钮(侧栏调试回退)
+$("go").onclick = () => { doLogin(accEl.value.trim(), pwEl.value); };
+
+// 统一登录入口(画布登录屏 + 侧栏回退共用)。
+function doLogin(id, password) {
+  if (!/^[A-Za-z0-9]{4,10}$/.test(id || "") || !password) { log("账号 4~10 位字母数字, 并填密码", "err"); return; }
+  curAccount = id; curPassword = password; localStorage.setItem("lastAccount", id);
+  if (loginScreen) loginScreen.setEnabled(false);
+  connectLogin();
+}
+
+// 开源忠实登录界面(Title.spk/Login.spk/LoginMenu.spk) —— 覆盖层 #uiScreen。
+let loginScreen = null;
+(async () => {
+  try {
+    loginScreen = new LoginScreen($("uiScreen"), {
+      onLogin: (id, pw) => doLogin(id, pw),
+      onRegister: (id, pw) => registerAccount(id, pw),
+    });
+    await loginScreen.load();
+    const last = localStorage.getItem("lastAccount"); if (last && loginScreen.idInput) loginScreen.idInput.value = last;
+    log("登录界面就绪(开源 Login.spk)", "info");
+  } catch (e) { log("登录界面加载失败: " + e.message, "err"); $("uiScreen").style.display = "none"; $("auth").style.display = "block"; }
+})();
+
+// 取某族某性别的站立/行走逐帧序列(真实 cfpk 美术, 朝向2=开源选角/建角用的斜向正面),
+// 供选角/建角屏画"逐帧循环动画"(开源 ANI_MILLISEC=100ms/帧, g_char_index 推进)。
+async function loadCharPreview(race, sex) {
+  const { frames, anim } = await buildRaceAssets(race, sex);
+  const pick = (dirs) => {
+    if (!dirs || !dirs.length) return [];
+    const seq = dirs[2] || dirs[0] || [];                         // 开源固定方向[2]
+    return seq.map((fr) => { const f = frames[fr.s]; return f ? { rgba: f.rgba, width: f.width, height: f.height, cx: fr.cx | 0, cy: fr.cy | 0 } : null; }).filter(Boolean);
+  };
+  return { stand: pick(anim.stand), move: pick(anim.move) };
+}
+// 兼容: 选角/建角屏当前用单帧预览(loadStand)。返回站立首帧。后续接入逐帧动画/装备合成时再统一。
+async function loadStand(race, sex) {
+  const a = await loadCharPreview(race, sex);
+  return a.stand[0] || null;
+}
+// 选角界面(发行包 CharManager.spk 美术 + 开源选角逻辑)。
+let charSelect = null;
+(async () => {
+  try {
+    charSelect = new CharSelectScreen($("uiScreen"), {
+      onSelect: (ch) => { charSelect.hide(); selectAndEnter(ch); },
+      onCreate: (slot) => { pendingSlot = slot; charSelect.hide(); if (charCreate) charCreate.show(slot); else { $("uiScreen").style.display = "none"; $("create").style.display = "block"; $("docreate").disabled = false; } log(`创建角色到槽${slot}`, "info"); },
+      onDelete: (ch) => { if (ch) openDeleteDialog(ch); },
+      loadCharPreview,
+    });
+    await charSelect.load();
+    log("选角界面就绪(开源 CharManager.spk)", "info");
+  } catch (e) { log("选角界面加载失败(回退侧栏): " + e.message, "err"); }
+})();
+// 建角界面(发行包 CharCreate.spk 美术 + 忠实建角逻辑)。
+let charCreate = null;
+(async () => {
+  try {
+    charCreate = new CharCreateScreen($("uiScreen"), {
+      onCreate: ({ name, race, sex, str, dex, int: intel }) => {
+        pendingName = name; pendingRace = RACE_NAMES[race]; pendingSex = sex;
+        log(`→ CL_CREATE_PC(${name}, ${pendingRace}, ${sex ? "女" : "男"}, ${str}/${dex}/${intel}, 槽${pendingSlot})`, "info");
+        loginWS.send(encCLCreatePC({ name, slot: pendingSlot, sex, str, dex, int: intel, race }));
+      },
+      onBack: () => { charCreate.hide(); showCharSelect(lastChars); },
+      loadCharPreview,
+    });
+    await charCreate.load();
+    log("建角界面就绪(开源 CharCreate.spk)", "info");
+  } catch (e) { log("建角界面加载失败(回退侧栏): " + e.message, "err"); }
+})();
+
+// 展示选角屏(覆盖层), 收起登录屏/建角屏/侧栏面板。
+function showCharSelect(chars) {
+  lastChars = chars;
+  $("uiScreen").style.display = "block";
+  $("create").style.display = "none"; $("pclist").style.display = "none";
+  if (loginScreen) loginScreen.hide();
+  if (charCreate) charCreate.hide();
+  if (charSelect) { charSelect.setChars(chars); charSelect.show(); }
+  else renderPCList({ chars, slots: [] });   // 选角屏不可用时回退侧栏 HTML
+}
+let lastChars = [];
+
+// 删除角色确认框 —— 忠实开源 C_VS_UI_CHAR_DELETE(非韩文版): 必须输入确认串 "DeletePc" 才删(暗金对话框, 非 JS confirm)。
+function openDeleteDialog(ch) {
+  let dlg = $("delDlg");
+  if (!dlg) {
+    dlg = document.createElement("div"); dlg.id = "delDlg";
+    dlg.style.cssText = "position:absolute;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);";
+    dlg.innerHTML = `<div style="width:320px;background:linear-gradient(#2a1d0e,#160d05);border:2px solid #a8843c;border-radius:8px;padding:18px 20px;color:#e8d6a8;font:14px system-ui;text-align:center">
+      <div id="delTitle" style="font-weight:700;color:#ffd76a;margin-bottom:8px">确认删除角色</div>
+      <div id="delMsg" style="font-size:12px;color:#c9b88c;margin-bottom:10px"></div>
+      <input id="delInput" autocomplete="off" placeholder="DeletePc" style="width:100%;padding:6px 8px;background:#0d0803;border:1px solid #6b5a38;border-radius:4px;color:#ffe8c8;outline:none;margin-bottom:12px"/>
+      <div style="display:flex;gap:10px;justify-content:center">
+        <button id="delOk" style="flex:1;padding:7px 0;background:linear-gradient(#3a2a14,#22160a);color:#ffe2a0;border:1px solid #a8843c;border-radius:4px;font-weight:600;cursor:pointer">确定</button>
+        <button id="delCancel" style="flex:1;padding:7px 0;background:linear-gradient(#2a2018,#171009);color:#cbb890;border:1px solid #6b5a38;border-radius:4px;font-weight:600;cursor:pointer">取消</button>
+      </div></div>`;
+    $("game").appendChild(dlg);
+  }
+  $("delTitle").textContent = `确认删除角色「${ch.name}」`;
+  $("delMsg").textContent = `此操作不可恢复。请输入 DeletePc 确认删除：`;
+  const inp = $("delInput"); inp.value = ""; dlg.style.display = "flex"; inp.focus();
+  const close = () => { dlg.style.display = "none"; };
+  $("delCancel").onclick = close;
+  const ok = () => {
+    if (inp.value !== "DeletePc") { $("delMsg").textContent = "确认串不正确, 请输入 DeletePc"; $("delMsg").style.color = "#e88"; return; }
+    log(`→ CL_DELETE_PC ${ch.name}(槽${ch.slot})`, "info");
+    loginWS.send(encCLDeletePC({ name: ch.nameBytes, slot: ch.slot, ssn: curAccount || "0" }));
+    close();
+  };
+  $("delOk").onclick = ok;
+  inp.onkeydown = (e) => { if (e.key === "Enter") ok(); else if (e.key === "Escape") close(); };
+}
+
+// 建角色: 发 CL_CREATE_PC 到选定空槽(种族/性别由表单选)。角色名暂限字母数字(中文需 GB2312, 后续支持)。
+$("docreate").onclick = () => {
+  const name = $("cname").value.trim();
+  if (!/^[A-Za-z0-9]{1,12}$/.test(name)) { log("角色名请用 1~12 位字母或数字", "err"); return; }
+  const raceIdx = parseInt($("crace").value, 10) || 0, sex = parseInt($("csex").value, 10) || 0;
+  // 各族属性规则(开源原版 CLCreatePCHandler): Slayer 各5~20且和≤30; Vampire 必须20/20/20; Ousters 各≥10且和=45。
+  const STATS = [{ str: 10, dex: 10, int: 10 }, { str: 20, dex: 20, int: 20 }, { str: 15, dex: 15, int: 15 }][raceIdx];
+  $("docreate").disabled = true;
+  pendingName = name; pendingRace = RACE_NAMES[raceIdx]; pendingSex = sex;
+  log(`→ CL_CREATE_PC(${name}, ${pendingRace}, ${sex ? "女" : "男"}, ${STATS.str}/${STATS.dex}/${STATS.int}, 槽${pendingSlot})`, "info");
+  loginWS.send(encCLCreatePC({ name, slot: pendingSlot, sex, ...STATS, race: raceIdx }));
+};
+
+// 选定服务端下发的某个角色进入(开源流程: 用 LC_PC_LIST 里的真实名字/种族, 不依赖本地缓存)。
+function selectAndEnter(ch) {
+  PC_NAME = ch.nameBytes; myCharName = ch.name;
+  myRace = ch.race; mySex = ch.sex || 0;
+  log(`→ CL_SELECT_PC ${ch.name}(${myRace}${mySex ? "女" : "男"}, 槽${ch.slot})`, "ok");
+  $("pclist").style.display = "none"; $("create").style.display = "none";
+  loginWS.send(encCLSelectPC({ pcName: ch.nameBytes, pcType: raceType(myRace) }));
+}
+// 渲染服务端角色列表: 每个角色一个按钮(可选), 有空槽再给「创建新角色」入口。
+function renderPCList(p) {
+  const box = $("pclist"); box.style.display = "block";
+  box.querySelectorAll(".pcbtn").forEach((b) => b.remove());
+  for (const ch of p.chars) {
+    const b = document.createElement("button");
+    b.className = "pcbtn"; b.style.cssText = "width:100%;margin:4px 0;background:#2b6;color:#021";
+    b.textContent = `▶ ${ch.name} · ${ch.race}${ch.sex ? "(女)" : "(男)"}`;
+    b.onclick = () => selectAndEnter(ch);
+    box.appendChild(b);
+  }
+  // 找最低空槽(SLOT_MAX=3); 有空槽 → 显示创建入口并记下目标槽。
+  const used = new Set(p.chars.map((c) => c.slot));
+  let free = -1; for (let s = 0; s < 3; s++) if (!used.has(s)) { free = s; break; }
+  if (free >= 0) { pendingSlot = free; $("create").style.display = "block"; $("docreate").disabled = false; }
+  else $("create").style.display = "none";
+}
+
+function onPacket(p) {
+  if (p.name === "LC_LOGIN_OK") { log("◀ LC_LOGIN_OK → 取角色列表", "ok"); loginWS.send(encCLGetPCList()); }
+  else if (p.name === "LC_LOGIN_ERROR") {
+    log("◀ LC_LOGIN_ERROR 错误码=" + p.errorID, "err");
+    if (window.__entered && !deliberateClose) {              // 重连中: 账号可能仍 GAME(踢人中), 稍后再试
+      if (reconnectTries < 6) { reconnectTries++; setTimeout(() => { if (!deliberateClose) connectLogin(); }, 2500); }
+      else statEl.innerHTML = "⚠ 重连失败, 请手动刷新";
+    } else { $("go").disabled = false; $("reg").disabled = false; if (loginScreen) loginScreen.setEnabled(true); }
+  }
+  else if (p.name === "LC_PC_LIST") {
+    log(`◀ LC_PC_LIST 槽位[${p.slots.join("")}] · ${p.chars.length} 个角色`, "ok");
+    // 重连时(已进过游戏)自动选回原角色, 不打断; 首次登录则展示选角屏让用户选/建。
+    if (window.__entered && myCharName) {
+      const back = p.chars.find((c) => c.name === myCharName) || p.chars[0];
+      if (back) { selectAndEnter(back); return; }
+    }
+    showCharSelect(p.chars);
+  }
+  else if (p.name === "LC_CREATE_PC_OK") {
+    log("◀ LC_CREATE_PC_OK 角色已创建", "ok");
+    $("create").style.display = "none";
+    loginWS.send(encCLGetPCList());                              // 开源流程: 建角后回到选角界面重取列表
+  }
+  else if (p.name === "LC_CREATE_PC_ERROR") { log("◀ 创建失败 错误码=" + p.errorID + (p.errorID === 2 ? "(重名/槽位占用)" : ""), "err"); $("docreate").disabled = false; }
+  else if (p.name === "LC_DELETE_PC_OK") { log("◀ LC_DELETE_PC_OK 角色已删除", "ok"); loginWS.send(encCLGetPCList()); }  // 重取列表 → 选角屏刷新
+  else if (p.name === "LC_DELETE_PC_ERROR") { log("◀ 删除失败 错误码=" + p.errorID, "err"); }
+  else if (p.name === "LC_RECONNECT") {
+    log(`◀ LC_RECONNECT → 游戏服 ${p.gameServerIP}:${p.gameServerPort}`, "ok");
+    statEl.innerHTML = `✅ 已进入游戏 · 服务器权威`;
+    $("auth").style.display = "none"; $("create").style.display = "none"; $("pclist").style.display = "none";
+    $("uiScreen").style.display = "none";                       // 进入游戏 → 移除登录覆盖层
+    loginWS.close();                                            // 关登录连接, 转 gameserver
+    connectGame(p.gameServerIP, p.gameServerPort, p.key);
+    window.__entered = true;
+  } else { log(`◀ ${p.name}(${p.size}B)`, ""); }
 }
 </script>
 </body>
