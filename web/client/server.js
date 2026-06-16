@@ -90,6 +90,20 @@ async function handleRegister(req, res) {
     } catch (e) { reply(500, { ok: false, error: "注册失败: " + e.message }); }
   });
 }
+
+// 怪物 MType→SType 映射(MonsterInfo 表)。客户端据此 + CreatureSprite.inf 取怪物精灵 FrameID(忠实链路)。查一次缓存。
+let _monsterMap = null;
+async function handleMonsterMap(res) {
+  try {
+    if (!_monsterMap) {
+      const out = await mysql("SELECT MType,SType FROM DARKEDEN.MonsterInfo");
+      const m = {};
+      for (const line of out.split("\n")) { const [mt, st] = line.split("\t"); if (mt) m[+mt] = +st; }
+      _monsterMap = JSON.stringify(m);
+    }
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }); res.end(_monsterMap);
+  } catch (e) { res.writeHead(500, { "Content-Type": "application/json" }); res.end("{}"); }
+}
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -133,6 +147,7 @@ function sendFile(res, file) {
 http.createServer((req, res) => {
   let p = decodeURIComponent(req.url.split("?")[0]);
   if (req.method === "POST" && p === "/api/register") return handleRegister(req, res);
+  if (p === "/api/monstermap") return handleMonsterMap(res);
   if (p === "/") p = "/public/index.html";
   // 开源 UI 资源: /ui/<相对 Data/Ui 的路径>(如 /ui/spk/login.spk, /ui/txt/ui.ifr)。独立穿越防护。
   let file;
