@@ -29,3 +29,8 @@ export function monsterFrameID(mType) {
   const sType = _mm && _mm[mType] !== undefined ? _mm[mType] : mType;
   return _cs && _cs[sType] !== undefined ? _cs[sType] : sType;
 }
+// NPC: GC_ADD_NPC 给的 SpriteType 已是精灵类型(不经 MType→SType 那层), 直接 CreatureSprite.inf[spriteType].FrameID。
+// (NPC 不在 MonsterInfo 表, 误走 monsterFrameID 会因 spriteType 碰撞某怪 MType 而显示成怪物。)
+export function spriteFrameID(spriteType) {
+  return _cs && _cs[spriteType] !== undefined ? _cs[spriteType] : spriteType;
+}
