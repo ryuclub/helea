@@ -501,6 +501,19 @@ void main(){
     this._renderAt(e, x, y); this._centerTile(x, y);
   }
 
+  // 近战太远: 寻路到目标怪的最近相邻可走格(玩家到达后再点击发起攻击)。
+  _approachTarget(e) {
+    const pe = this.player; if (!pe) return;
+    const DIRS = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [-1, 1], [1, -1], [1, 1]];
+    let best = null, bestD = Infinity;
+    for (const [dc, dr] of DIRS) {
+      const c = e.col + dc, r = e.row + dr;
+      if (!this._walkable(c, r)) continue;
+      const d = Math.max(Math.abs(c - pe.col), Math.abs(r - pe.row));
+      if (d < bestD) { bestD = d; best = { col: c, row: r }; }
+    }
+    if (best) this.moveTo(best.col, best.row);
+  }
   // 一次性动作(攻击 attack / 死亡 die): 播一遍。hold=true 定格末帧(死亡), 否则播完回站立。
   playAction(name, hold = false) {
     const e = this.player; if (!e || !(e.anim[name] && e.anim[name].length)) return;
@@ -559,8 +572,18 @@ void main(){
           if (e.plane !== p.pickedMesh) continue;
           if (e.kind === "monster" && this._netAttack) {
             const pe = this.player;
-            if (pe) { pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row)); this.playAction("attack"); }
-            this._netAttack(oid); return;
+            if (pe) {
+              const dist = Math.max(Math.abs(e.col - pe.col), Math.abs(e.row - pe.row));   // 切比雪夫(无朝向限制)
+              if (dist <= 1) {                                                              // 相邻: 近战攻击(冷却门槛防 spam)
+                pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row));
+                const now = performance.now();
+                if (now >= (this._atkCdUntil || 0)) {
+                  this.playAction("attack"); this._netAttack(oid);
+                  this._atkCdUntil = now + (this.atkDelayMs || 700);                        // 攻速冷却(对齐服务端节奏)
+                }
+              } else this._approachTarget(e);                                              // 太远: 寻路到怪相邻格
+            }
+            return;
           }
           if (e.kind === "npc" && this._netNPCTalk) { this._netNPCTalk(oid); return; }
         }

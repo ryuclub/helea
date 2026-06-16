@@ -11,8 +11,9 @@ import { loadUIPack } from "./uispk.js";
 const SCR_W = 800, SCR_H = 600, SLOT = 3;
 const HEART_RECT = [250, 430, 610], HEART_Y = 180, HEART_W = 167, HEART_H = 271;
 const TITLE_X = 400, TITLE_Y = 50;
-const FOOT_DX = 55, FOOT_DY = 170;     // 立绘脚点相对槽框左上
-const NAME_DX = 76, NAME_DY = 42;      // 名字中心相对槽框左上
+// 立绘脚点相对槽框左上。立绘渲染 31×85 ×PREVIEW_SCALE(2)=62×170; 用户调: 右+1/2人宽(31)、下+1/3人高(57)使框内居中。
+const FOOT_DX = 86, FOOT_DY = 227;
+const NAME_DX = 76, NAME_DY = 58;      // 名字中心相对槽框左上(用户调: 下移一个字高16px, 42→58)
 const DEL_DX = 119, DEL_DY = 36;       // 删除按钮相对槽框左上
 const BACK_XY = [28, 522], NEXT_XY = [687, 522], CREATE_XY = [555, 542];
 const ANIM_MS = 100, PREVIEW_SCALE = 2;

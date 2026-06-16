@@ -83,9 +83,9 @@ import { CharCreateScreen } from "../src/ui-charcreate.js";
 import { HudHpBar } from "../src/ui-hud.js";
 import { InventoryUI } from "../src/ui-inventory.js";
 import { ShopUI } from "../src/ui-shop.js";
-import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
+import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCLQueryCharacterName, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
-  encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell,
+  encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell, encCGUsePotionFromInventory,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 import { loadItemInf, getItemInfo } from "../src/iteminfo.js";
 import { loadMonsterMap, loadCreatureSprite, monsterFrameID, spriteFrameID } from "../src/creature-sprite.js";
@@ -438,6 +438,10 @@ function onInvAction(action, p) {
     it.slotID = p.slotID; delete it.invenX; delete it.invenY; gearItems.push(it);
     send(encCGAddMouseToGear({ objectID: it.objectID, slotID: p.slotID }));
     invCursorItem = null; invCursorFrom = null; refreshInv(); invUI.clearCursor();
+  } else if (action === "useInv") {                            // 右键使用: 药水(ITEM_CLASS_POTION=1)→喝, 服务端回血/蓝走 GC_MODIFY_INFORMATION
+    const it = p.item;
+    if (it.itemClass === 1) { send(encCGUsePotionFromInventory({ objectID: it.objectID, invenX: it.invenX, invenY: it.invenY })); log(`▶ 喝药 #${it.objectID}`, "ok"); }
+    else log("该物品不能直接使用(目前仅支持药水)", "info");
   }
 }
 // 操作失败(GCCannotAdd)或换区: 光标物品放回原位。
@@ -484,6 +488,9 @@ function ensureShopUI() {
     if (gws && gws.readyState === 1) gws.send(encCGShopRequestBuy({ objectID: shopUI.npcID, rackType: shopUI.rackType, rackIndex: it.index, num: 1, x: slot.x, y: slot.y }));
   });
   shopUI.setSellHandler((on) => { shopSellMode = on; });
+  shopUI.setRackHandler((rack) => {                                          // 切货架 → 重新请求该货架商品(服务端续发 GCShopList)
+    if (gws && gws.readyState === 1) gws.send(encCGShopRequestList({ objectID: shopUI.npcID, rackType: rack }));
+  });
   return shopUI;
 }
 // NPC 动态菜单(GCNPCAskDynamic 293): 服务端直发中文 subject+contents选项。点选项推进 quest 对话。
@@ -592,7 +599,7 @@ function onGamePacket(p) {
   else if (p.name === "GC_NPC_ASK_DYNAMIC") { const e = renderer._others.get(p.objectID); showNPCAsk(p.objectID, e ? e.name : "NPC", p.subject, p.contents); }   // 293 服务端中文菜单
   else if (p.name === "GC_NPC_SAY") { log(`◀ GC_NPC_SAY scriptID=${p.scriptID}(脚本文本锁dpk)`, "info"); }
   // ── 商店 ──
-  else if (p.name === "GC_SHOP_LIST") { const s = ensureShopUI(); if (invUI && invUI.itemPack) s.setItemPack(invUI.itemPack); s.open(p.objectID, p); log(`◀ 商店 ${p.items.length} 件商品`, "ok"); }
+  else if (p.name === "GC_SHOP_LIST") { const s = ensureShopUI(); if (invUI && invUI.itemPack) s.setItemPack(invUI.itemPack); s.race = myRace; s.open(p.objectID, p); log(`◀ 商店 ${p.items.length} 件商品`, "ok"); }
   else if (p.name === "GC_SHOP_BUY_OK") { log("◀ 购买成功", "ok"); }                                       // 物品入背包走 GCCreateItem, 金钱走 GC_MODIFY
   else if (p.name === "GC_SHOP_BUY_FAIL") { const r = { 0: "金钱不足", 1: "背包空间不足", 2: "NPC不存在", 3: "非NPC", 4: "商品不存在" }[p.code] || ("code" + p.code); log("◀ 购买失败: " + r, "err"); }
   else if (p.name === "GC_SHOP_SELL_OK") { log("◀ 出售成功", "ok"); }
@@ -625,14 +632,16 @@ $("toggleSide").onclick = () => {
 
 // 注册(1-A): 调后端 /api/register 建空号(角色由 CL_CREATE_PC 真协议创建)。
 async function registerAccount(id, password) {
-  if (!/^[A-Za-z0-9]{4,10}$/.test(id || "")) { log("账号需 4~10 位字母或数字", "err"); return false; }
-  if (!/^[A-Za-z0-9]{6,10}$/.test(password || "")) { log("密码需 6~10 位字母或数字", "err"); return false; }
+  const note = (msg, ok) => { log(msg, ok ? "ok" : "err"); if (loginScreen && loginScreen.toast) loginScreen.toast(msg, ok); };  // 登录屏可见反馈
+  if (!/^[A-Za-z0-9]{4,10}$/.test(id || "")) { note("账号需 4~10 位字母或数字", false); return false; }
+  if (!/^[A-Za-z0-9]{6,10}$/.test(password || "")) { note("密码需 6~10 位字母或数字", false); return false; }
   try {
+    note("注册中…", true);
     const r = await fetch("/api/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, password }) });
     const j = await r.json();
-    if (j.ok) { log(`✅ 注册成功: ${id} —— 点「确定」登录并创建角色`, "ok"); return true; }
-    log("注册失败: " + j.error, "err"); return false;
-  } catch (e) { log("注册请求失败: " + e.message, "err"); return false; }
+    if (j.ok) { note(`✅ 注册成功: ${id} —— 直接点「确定」登录`, true); if (loginScreen && loginScreen.idInput) { loginScreen.idInput.value = id; } localStorage.setItem("lastAccount", id); return true; }
+    note("注册失败: " + j.error, false); return false;
+  } catch (e) { note("注册请求失败: " + e.message, false); return false; }
 }
 $("reg").onclick = async () => { $("reg").disabled = true; await registerAccount(accEl.value.trim(), pwEl.value); $("reg").disabled = false; };
 
@@ -715,6 +724,7 @@ let charCreate = null;
         loginWS.send(encCLCreatePC({ name, slot: pendingSlot, sex, str, dex, int: intel, race }));
       },
       onBack: () => { charCreate.hide(); showCharSelect(lastChars); },
+      onCheck: (name) => { if (loginWS && loginWS.readyState === 1) loginWS.send(encCLQueryCharacterName({ name })); },  // 查重名→loginserver
       loadCharPreview,
     });
     await charCreate.load();
@@ -787,7 +797,9 @@ function selectAndEnter(ch) {
   loginWS.send(encCLSelectPC({ pcName: ch.nameBytes, pcType: raceType(myRace) }));
 }
 // 调试钩子(真机验证脚本用): 程序化登录/选角, 绕开画布登录屏点击。
-window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreature: loadCreatureAssets, monsterFrameID, spriteFrameID, showNPCAsk };
+window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreature: loadCreatureAssets, monsterFrameID, spriteFrameID, showNPCAsk,
+  openShop: (list) => { const s = ensureShopUI(); s.race = myRace; s.open(0xABCD, list); },  // 验证用: 喂假 GCShopList 直接开商店窗
+  selScreen: () => charSelect, ccScreen: () => charCreate, showCharSelect };                  // 验证用: 选角/建角屏
 // 渲染服务端角色列表: 每个角色一个按钮(可选), 有空槽再给「创建新角色」入口。
 function renderPCList(p) {
   const box = $("pclist"); box.style.display = "block";
@@ -832,6 +844,7 @@ function onPacket(p) {
   else if (p.name === "LC_CREATE_PC_ERROR") { log("◀ 创建失败 错误码=" + p.errorID + (p.errorID === 2 ? "(重名/槽位占用)" : ""), "err"); $("docreate").disabled = false; }
   else if (p.name === "LC_DELETE_PC_OK") { log("◀ LC_DELETE_PC_OK 角色已删除", "ok"); loginWS.send(encCLGetPCList()); }  // 重取列表 → 选角屏刷新
   else if (p.name === "LC_DELETE_PC_ERROR") { log("◀ 删除失败 错误码=" + p.errorID, "err"); }
+  else if (p.name === "LC_QUERY_RESULT_CHARACTER_NAME") { log(`◀ 查重名 "${p.queryName}" → ${p.exist ? "已占用" : "可用"}`, p.exist ? "err" : "ok"); if (charCreate) charCreate.showCheckResult(p.queryName, p.exist); }
   else if (p.name === "LC_RECONNECT") {
     log(`◀ LC_RECONNECT → 游戏服 ${p.gameServerIP}:${p.gameServerPort}`, "ok");
     statEl.innerHTML = `✅ 已进入游戏 · 服务器权威`;

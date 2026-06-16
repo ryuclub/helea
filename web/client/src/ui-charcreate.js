@@ -22,15 +22,17 @@ const M = { WINDOW: 0, GUARD: 1, TITLE: 2, MARK: 3, SLAYER: 5, VAMPIRE: 6, OUSTE
   CHECK: 16, CHECK_H: 18, SAVE: 19, SAVE_H: 21, LOAD: 22, LOAD_H: 24, REROLL: 25, REROLL_H: 27,
   BONUS_LINE: 28, PLUS: 29, PLUS_H: 31, MINUS: 32, MINUS_H: 34 };
 // 坐标(官方 skin)
-const PANEL_XY = [250, 150], TITLE_X = 400, TITLE_Y = 50, GUARD_XY = [55, 350], FOOT = [95, 440], NAME_XY = [421, 183];
-const RACE_BTN = [[404, 218], [473, 218], [404, 241]];   // slayer/vampire/ousters
-const SEX_BTN = [[404, 276], [465, 276]];                // male/female
+// FOOT: 立绘脚点。立绘渲染 31×85(×1)。用户调: 右+1人宽(31)、下+1/3人高(28)使角色框内居中。
+const PANEL_XY = [250, 150], TITLE_X = 400, TITLE_Y = 50, GUARD_XY = [55, 350], FOOT = [126, 468], NAME_XY = [393, 183];  // 名字框: 用户调左移4字母宽(28) 421→393
+const RACE_BTN = [[425, 218], [494, 218], [425, 241]];   // slayer/vampire/ousters(用户调: 白字右移3字宽21, 404→425)
+const SEX_BTN = [[425, 276], [486, 276]];                // male/female(右移21)
 const SAVE_XY = [572, 215], LOAD_XY = [617, 215], REROLL_XY = [664, 215], CHECK_XY = [503, 178];
 const PLUS_XY = [[740, 250], [740, 275], [740, 300]], MINUS_XY = [[725, 250], [725, 275], [725, 300]];
 const BACK_XY = [28, 522], NEXT_XY = [687, 522];
 const RACE_MARK = [[411, 223], [480, 223], [411, 246]];  // 种族选中标记(MALE_CHECK)
 const SEX_MARK = [[411, 281], [473, 281]];               // 性别选中标记(男/女)
-const STAT_X = 714, STAT_Y0 = 249, STAT_DY = 25, BONUS_LINE_XY = [573, 470];
+// 属性数字: 用户调 左-3数字宽(21)、下+1/2数字高(7), 使数字不贴凹槽右边。
+const STAT_X = 693, STAT_Y0 = 256, STAT_DY = 25, BONUS_LINE_XY = [573, 470];
 
 // 属性机制忠实复刻 RollDice(VS_UI_Title.cpp:896-982):
 //   Slayer: STR=5+rand%16; DEX=5+rand%(余-5+1); INT=30-STR-DEX; 随机打乱 → 和恒30、各≥5、可重掷/存读。
@@ -52,8 +54,9 @@ function derive(s) {
 }
 
 export class CharCreateScreen {
-  constructor(container, { onCreate, onBack, loadCharPreview }) {
+  constructor(container, { onCreate, onBack, loadCharPreview, onCheck }) {
     this.container = container; this.onCreate = onCreate; this.onBack = onBack; this.loadCharPreview = loadCharPreview;
+    this.onCheck = onCheck;   // (name) → 发 CL_QUERY_CHARACTER_NAME 查重名, 回包走 showCheckResult
     this.race = 0; this.sex = 0; this.stat = rollDice(0); this._save = null;
     this._anim = new Map(); this._frame = 0; this._timer = null; this.hover = null;
   }
@@ -144,7 +147,11 @@ export class CharCreateScreen {
   _check() {
     const name = this.nameInput.value.trim();
     if (!/^[A-Za-z0-9]{1,10}$/.test(name)) { this._toast("角色名请用 1~10 位字母或数字"); return; }
-    this._toast(`"${name}" 格式合法`);                              // 服务端重名检查(CG包)待接, 先本地格式校验
+    if (this.onCheck) { this._toast(`检查"${name}"…`); this.onCheck(name); }   // 发 CL_QUERY_CHARACTER_NAME, 回包→showCheckResult
+    else this._toast(`"${name}" 格式合法`);
+  }
+  showCheckResult(name, exist) {                                    // LC_QUERY_RESULT_CHARACTER_NAME 回包
+    this._toast(exist ? `"${name}" 已被占用, 请换一个` : `"${name}" 可以使用 ✓`);
   }
   async _ensureAnim() {
     const key = RACE_NAMES[this.race] + ":" + this.sex;

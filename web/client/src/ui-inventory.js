@@ -166,6 +166,7 @@ export class InventoryUI {
     document.body.appendChild(this.tipEl);
     document.addEventListener("mousemove", (e) => { if (this.cursor) { this.cursorEl.style.left = (e.clientX + 6) + "px"; this.cursorEl.style.top = (e.clientY + 6) + "px"; } });
     this.invCv.addEventListener("click", (e) => this._clickInv(e.offsetX / SCALE, e.offsetY / SCALE));
+    this.invCv.addEventListener("contextmenu", (e) => { e.preventDefault(); this._rclickInv(e.offsetX / SCALE, e.offsetY / SCALE); });  // 右键药水=喝
     this.gearCv.addEventListener("click", (e) => this._clickGear(e.offsetX / SCALE, e.offsetY / SCALE));
     this.invCv.addEventListener("mousemove", (e) => this._hover(e, "inv"));
     this.gearCv.addEventListener("mousemove", (e) => this._hover(e, "gear"));
@@ -207,6 +208,14 @@ export class InventoryUI {
     if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS || !this.onAction) return;
     if (this.cursor) this.onAction("dropInv", { col, row });                                 // 放下到背包格
     else { const it = this.inv.find((t) => t.invenX === col && t.invenY === row); if (it) this.onAction("pickInv", { item: it }); } // 拿起
+  }
+  _rclickInv(px, py) {                                            // 右键: 使用物品(药水→喝), 持物态不触发
+    if (this.cursor || !this.onAction) return;
+    const inv = INV[this.race] || INV.slayer;
+    const col = Math.floor((px - inv.x0) / CELL), row = Math.floor((py - inv.y0) / CELL);
+    if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS) return;
+    const it = this.inv.find((t) => t.invenX === col && t.invenY === row);
+    if (it) this.onAction("useInv", { item: it });
   }
   _clickGear(px, py) {
     const gear = GEAR[this.race] || GEAR.slayer;

@@ -12,6 +12,8 @@ export const PACKET = {
   CL_SELECT_PC: 159,
   CL_CREATE_PC: 148,          // 角色创建
   CL_DELETE_PC: 149,          // 角色删除
+  CL_QUERY_CHARACTER_NAME: 155,        // 建角"Check": 查角色名是否被占用
+  LC_QUERY_RESULT_CHARACTER_NAME: 448, // 回: u8 len+name+u8 bExist(1重名/0可用)
   LC_CREATE_PC_OK: 441,
   LC_CREATE_PC_ERROR: 440,
   LC_DELETE_PC_OK: 443,
@@ -87,6 +89,15 @@ export const PACKET = {
   GC_SHOP_BUY_FAIL: 343,          // 购买失败
   GC_SHOP_SELL_OK: 349,           // 出售成功
   GC_SHOP_SELL_FAIL: 348,         // 出售失败
+  // 喝药(通用回HP/MP, 非圣水圣药CGSkillToInventory): ObjID u32+InvenX u8+InvenY u8 (SHUFFLE_3)
+  CG_USE_POTION_FROM_INVENTORY: 139,
+  GC_HP_RECOVERY_END_TO_SELF: 256,    // 回血结束(给自己): 仅命名静默, HP 实改走 GC_MODIFY_INFORMATION
+  GC_HP_RECOVERY_START_TO_SELF: 258,  // 回血开始(给自己): 仅命名静默
+  GC_MP_RECOVERY_END: 285,            // 回蓝结束: 仅命名静默(实改走 GC_MODIFY_INFORMATION)
+  GC_MP_RECOVERY_START: 286,          // 回蓝开始: 仅命名静默
+  // 快捷栏(明文): 绑物品入栏 CG_ADD_MOUSE_TO_QUICKSLOT(9) ObjID u32+SlotID u8; 从栏喝药 CG_USE_POTION_FROM_QUICKSLOT(140) 同字段
+  CG_ADD_MOUSE_TO_QUICKSLOT: 9,
+  CG_USE_POTION_FROM_QUICKSLOT: 140,
 };
 export const NAME = Object.fromEntries(Object.entries(PACKET).map(([k, v]) => [v, k]));
 
@@ -190,6 +201,11 @@ export function encCLCreatePC({ name, slot = 0, sex = 0, hairStyle = 0, hairColo
   w.u8(race);
   return frame(PACKET.CL_CREATE_PC, w.build());
 }
+// 建角"Check"查重名 CL_QUERY_CHARACTER_NAME(155, loginserver, 明文)。线格式: u8 szName + name。
+export function encCLQueryCharacterName({ name }) {
+  const nb = name instanceof Uint8Array ? name : Uint8Array.from([...name].map((c) => c.charCodeAt(0) & 0xff));
+  return frame(PACKET.CL_QUERY_CHARACTER_NAME, new Writer().u8(nb.length).raw(nb).build());
+}
 // 角色删除 CL_DELETE_PC(149, loginserver)。线格式(CLDeletePC::read): u8 szName+name, u8 slot, u8 szSSN+SSN。
 // 服务端: 校验角色属本账号(Slayer 主表 PlayerID), SSN 段当前未校验(handler 已注释), 但格式要求 szSSN≥1 → 发非空占位。
 export function encCLDeletePC({ name, slot = 0, ssn = "0" }) {
@@ -285,6 +301,28 @@ export function encCGAddZoneToMouse({ objectID, zoneX, zoneY }) {
     if (m === 0) { A(); B(); C(); } else if (m === 1) { B(); C(); A(); } else { C(); A(); B(); }
   }
   return gframe(PACKET.CG_ADD_ZONE_TO_MOUSE, w.build());
+}
+
+// 喝药 CGUsePotionFromInventory(139)。SHUFFLE_3(A=ObjID u32, B=InvenX u8, C=InvenY u8) —— 与 CGAddZoneToMouse 同构。
+// objectID=药水物品ObjectID; invenX/invenY=药水在背包格坐标。服务端回血/蓝走 GC_MODIFY_INFORMATION(applyMods)。
+export function encCGUsePotionFromInventory({ objectID, invenX, invenY }) {
+  const w = new Writer();
+  if (_code === 0) { w.u32(objectID >>> 0).u8(invenX).u8(invenY); }
+  else {
+    const c = _code;
+    const A = () => w.u32((objectID ^ c) >>> 0), B = () => w.u8(invenX ^ c), C = () => w.u8(invenY ^ c);
+    const m = c % 3;
+    if (m === 0) { A(); B(); C(); } else if (m === 1) { B(); C(); A(); } else { C(); A(); B(); }
+  }
+  return gframe(PACKET.CG_USE_POTION_FROM_INVENTORY, w.build());
+}
+// 绑物品到快捷槽 CG_ADD_MOUSE_TO_QUICKSLOT(9, 明文): 光标持物→槽。objectID=物品, slotID=槽号(0~7)。
+export function encCGAddMouseToQuickSlot({ objectID, slotID }) {
+  return gframe(PACKET.CG_ADD_MOUSE_TO_QUICKSLOT, new Writer().u32(objectID >>> 0).u8(slotID).build());
+}
+// 从快捷槽喝药 CG_USE_POTION_FROM_QUICKSLOT(140, 明文): objectID=槽内药水, slotID=槽号。回血/蓝走 GC_MODIFY_INFORMATION。
+export function encCGUsePotionFromQuickSlot({ objectID, slotID }) {
+  return gframe(PACKET.CG_USE_POTION_FROM_QUICKSLOT, new Writer().u32(objectID >>> 0).u8(slotID).build());
 }
 // 背包格→光标 CGAddInventoryToMouse(4) / 光标→背包格 CGAddMouseToInventory(8)。★服务端明文读, 永远明文发。
 export function encCGAddInventoryToMouse({ objectID, invenX, invenY }) {
@@ -562,6 +600,7 @@ export function decode(u8) {
     else if (id === PACKET.LC_LOGIN_ERROR) { out.errorID = r.u8(); }
     else if (id === PACKET.LC_CREATE_PC_ERROR) { out.errorID = r.u8(); }
     else if (id === PACKET.LC_CREATE_PC_OK) { out.ok = true; } // 成功; 角色已建, 随后重拉 PC 列表
+    else if (id === PACKET.LC_QUERY_RESULT_CHARACTER_NAME) { const n = r.u8(); out.queryName = String.fromCharCode(...Array.from({ length: n }, () => r.u8())); out.exist = r.u8() !== 0; } // 查重名结果
     else if (id === PACKET.LC_DELETE_PC_OK) { out.ok = true; }  // 删除成功(空体), 随后重拉 PC 列表
     else if (id === PACKET.LC_DELETE_PC_ERROR) { out.errorID = r.u8(); }
     else if (id === PACKET.LC_RECONNECT) { const n = r.u8(); out.gameServerIP = r.str(n); out.gameServerPort = r.u32(); out.key = r.u32(); }

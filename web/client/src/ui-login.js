@@ -114,6 +114,23 @@ export class LoginScreen {
     this.wrap.style.transform = `translate(-50%,-50%) scale(${s})`;
   }
 
+  // 登录屏可见提示条(注册成功/失败等), 显示在登录框下方。ok=true 绿/false 红。
+  toast(msg, ok = true) {
+    let t = this._toastEl;
+    if (!t) {
+      t = document.createElement("div");
+      t.style.cssText = "position:absolute;left:50%;top:345px;transform:translateX(-50%);max-width:300px;padding:8px 16px;"
+        + "border-radius:6px;font:14px system-ui;text-align:center;letter-spacing:1px;opacity:0;transition:opacity .2s;"
+        + "pointer-events:none;z-index:6;box-shadow:0 2px 12px rgba(0,0,0,.6);";
+      this.wrap.appendChild(t); this._toastEl = t;
+    }
+    t.style.background = ok ? "linear-gradient(#1d2a0e,#0d1605)" : "linear-gradient(#2a0e0e,#160505)";
+    t.style.border = ok ? "1px solid #6fa83c" : "1px solid #c0603c";
+    t.style.color = ok ? "#d8ffa0" : "#ffc0a0";
+    t.textContent = msg; t.style.opacity = "1";
+    clearTimeout(this._toastTimer); this._toastTimer = setTimeout(() => { t.style.opacity = "0"; }, 2800);
+  }
+
   show() { this.wrap.style.display = "block"; this._layout(); this.idInput.focus(); }
   hide() { this.wrap.style.display = "none"; }
   setEnabled(on) { this.idInput.disabled = !on; this.pwInput.disabled = !on; }
