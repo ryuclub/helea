@@ -74,6 +74,30 @@ export const PACKET = {
 };
 export const NAME = Object.fromEntries(Object.entries(PACKET).map(([k, v]) => [v, k]));
 
+// 服务端文本编码: 基础数据(怪物/NPC名 HName)是 EUC-KR 韩文(但实际发送多用英文 EName 不受影响),
+// StringPool/系统消息/NPC对话/聊天是 GBK 中文(中文服汉化)。统一用 GBK 解码: 向后兼容 ASCII(英文名 OK),
+// 中文正确。★发送中文(聊天)需 GBK 编码(见 gbkEncode)。
+function gbkDecode(arr) { return new TextDecoder("gbk").decode(arr instanceof Uint8Array ? arr : Uint8Array.from(arr)); }
+// GBK 编码(发送聊天等中文): JS 无内置 GBK TextEncoder, 首次用 TextDecoder 反向构建 char→GBK字节 表(缓存)。
+let _gbkEncMap = null;
+function gbkEncode(str) {
+  if (!_gbkEncMap) {
+    _gbkEncMap = new Map(); const dec = new TextDecoder("gbk");
+    for (let hi = 0x81; hi <= 0xfe; hi++) for (let lo = 0x40; lo <= 0xfe; lo++) {
+      if (lo === 0x7f) continue;
+      const ch = dec.decode(Uint8Array.from([hi, lo]));
+      if (ch.length === 1 && ch !== "�" && !_gbkEncMap.has(ch)) _gbkEncMap.set(ch, (hi << 8) | lo);
+    }
+  }
+  const out = [];
+  for (const ch of str) {
+    const c = ch.codePointAt(0);
+    if (c < 128) out.push(c);
+    else { const v = _gbkEncMap.get(ch); if (v) out.push(v >> 8, v & 0xff); else out.push(0x3f); }   // 不可编码→'?'
+  }
+  return Uint8Array.from(out);
+}
+
 // ---- 写缓冲 ----
 export class Writer {
   constructor() { this.bytes = []; }
@@ -273,7 +297,7 @@ export function encCGAddMouseToZone({ objectID }) {
 
 // 聊天(明文 UTF-8; 服务器只转发字节, 网页端之间中文可通)。消息字节 ≤128(服务器限制)。
 export function encCGSay(message, color = 0) {
-  let bytes = new TextEncoder().encode(message);
+  let bytes = gbkEncode(message);                              // GBK 编码(与服务端/原版客户端一致, 中文不乱)
   if (bytes.length > 128) bytes = bytes.slice(0, 128);
   const w = new Writer();
   w.u32(color).u8(bytes.length).raw(bytes);
@@ -288,7 +312,7 @@ function readSlayerInfo(r) {
   const o = {};
   o.objectID = r.u32();
   const n = r.u8(); const nb = []; for (let i = 0; i < n; i++) nb.push(r.u8());
-  o.name = new TextDecoder().decode(Uint8Array.from(nb));
+  o.name = gbkDecode(Uint8Array.from(nb));
   o.x = r.u8(); o.y = r.u8(); o.dir = r.u8();
   o.outlook = r.u32();
   o.sex = (o.outlook & 1) ? 0 : 1;        // SLAYER_BIT_SEX=0: 1=MALE(男) → sex=0 男 / 1 女
@@ -312,7 +336,7 @@ function readVampOustInfo(r, race) {
   const o = { race };
   o.objectID = r.u32();
   const n = r.u8(); const nb = []; for (let i = 0; i < n; i++) nb.push(r.u8());
-  o.name = new TextDecoder().decode(Uint8Array.from(nb));
+  o.name = gbkDecode(Uint8Array.from(nb));
   o.x = r.u8(); o.y = r.u8(); o.dir = r.u8();
   o.sex = (r.u8() & 1) ? 0 : 1;   // ★服务端 Sex2String={FEMALE,MALE} → MALE=1; 我们 sex=0 男 → 须反转
   return o;
@@ -325,7 +349,7 @@ function readMonster(r) {
   o.objectID = r.u32();
   o.spriteType = r.u16();
   const n = r.u8(); const nb = []; for (let i = 0; i < n; i++) nb.push(r.u8());
-  o.name = new TextDecoder().decode(Uint8Array.from(nb));
+  o.name = gbkDecode(Uint8Array.from(nb));
   o.mainColor = r.u16(); o.subColor = r.u16();
   o.x = r.u8(); o.y = r.u8(); o.dir = r.u8();
   const ln = r.u8(); for (let i = 0; i < ln * 2; i++) r.u16();   // EffectInfo: ListNum + ListNum*2 个 WORD, 跳过
@@ -338,7 +362,7 @@ function readNPC(r) {
   const o = { kind: "npc" };
   o.objectID = r.u32();
   const n = r.u8(); const nb = []; for (let i = 0; i < n; i++) nb.push(r.u8());
-  o.name = new TextDecoder().decode(Uint8Array.from(nb));
+  o.name = gbkDecode(Uint8Array.from(nb));
   o.npcID = r.u16(); o.spriteType = r.u16();
   o.mainColor = r.u16(); o.subColor = r.u16();
   o.x = r.u8(); o.y = r.u8(); o.dir = r.u8();
@@ -467,7 +491,7 @@ function readPCListSlayer(r) {
   const outlook = r.u32();
   for (let i = 0; i < 7; i++) r.u16();
   r.u8();
-  return { slot, race: "slayer", nameBytes: nb, name: new TextDecoder().decode(nb), sex: (outlook & 1) ? 0 : 1 };
+  return { slot, race: "slayer", nameBytes: nb, name: gbkDecode(nb), sex: (outlook & 1) ? 0 : 1 };
 }
 // Vampire: name,slot,alignment(4),sex(1),BatColor(2),SkinColor(2),coatType(1),CoatColor(2),
 //   STR/DEX/INT(2×3),HP(2×2),Level(1),Rank(1),Exp(4),Fame(4),Bonus(2),AdvLevel(1)。
@@ -477,7 +501,7 @@ function readPCListVampire(r) {
   r.u16(); r.u16(); r.u8(); r.u16();
   r.u16(); r.u16(); r.u16(); r.u16(); r.u16();
   r.u8(); r.u8(); r.u32(); r.u32(); r.u16(); r.u8();
-  return { slot, race: "vampire", nameBytes: nb, name: new TextDecoder().decode(nb), sex };
+  return { slot, race: "vampire", nameBytes: nb, name: gbkDecode(nb), sex };
 }
 // Ousters: name,slot,alignment(4),sex(1),CoatColor/HairColor/ArmColor/BootsColor(2×4),shapeType(1),
 //   STR/DEX/INT(2×3),HP(2×2),MP(2×2),Level(1),Rank(1),Exp(4),Fame(4),Bonus(2),SkillBonus(2),AdvLevel(1)。
@@ -487,7 +511,7 @@ function readPCListOusters(r) {
   r.u16(); r.u16(); r.u16(); r.u16(); r.u8();
   r.u16(); r.u16(); r.u16(); r.u16(); r.u16(); r.u16(); r.u16();
   r.u8(); r.u8(); r.u32(); r.u32(); r.u16(); r.u16(); r.u8();
-  return { slot, race: "ousters", nameBytes: nb, name: new TextDecoder().decode(nb), sex };
+  return { slot, race: "ousters", nameBytes: nb, name: gbkDecode(nb), sex };
 }
 
 // ---- 解码(S→C) ----
@@ -500,7 +524,7 @@ export function decode(u8) {
   const r = new Reader(u8, HEADER);
   try {
     if (id === PACKET.GC_SET_POSITION) { out.x = r.u8(); out.y = r.u8(); out.dir = r.u8(); } // 明文
-    else if (id === PACKET.GC_SAY) { out.objectID = r.u32(); out.color = r.u32(); const n = r.u8(); const mb = []; for (let i = 0; i < n; i++) mb.push(r.u8()); out.message = new TextDecoder().decode(Uint8Array.from(mb)); }
+    else if (id === PACKET.GC_SAY) { out.objectID = r.u32(); out.color = r.u32(); const n = r.u8(); const mb = []; for (let i = 0; i < n; i++) mb.push(r.u8()); out.message = gbkDecode(Uint8Array.from(mb)); }
     else if (id === PACKET.LC_LOGIN_OK) { out.isAdult = r.u8(); out.bFamily = r.u8(); out.stat = r.u8(); out.lastDays = r.u16(); }
     else if (id === PACKET.LC_LOGIN_ERROR) { out.errorID = r.u8(); }
     else if (id === PACKET.LC_CREATE_PC_ERROR) { out.errorID = r.u8(); }
