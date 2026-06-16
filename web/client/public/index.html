@@ -76,7 +76,7 @@ import { CharCreateScreen } from "../src/ui-charcreate.js";
 import { HudHpBar } from "../src/ui-hud.js";
 import { InventoryUI } from "../src/ui-inventory.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
-  encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone,
+  encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 
 const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
@@ -235,6 +235,8 @@ async function placePlayerAt(x, y) {
           const slot = firstFreeInvSlot(); if (!slot) { log("背包已满, 无法拾取", "err"); return; }
           if (gws && gws.readyState === 1) gws.send(encCGAddZoneToInventory({ objectID, zoneX: g.x, zoneY: g.y, invenX: slot.x, invenY: slot.y }));
         });
+        // 点 NPC → 发 CGNPCTalk; 服务端回 GCNPCSayDynamic(中文对话)/GCNPCResponse(开界面/关对话)。
+        renderer.setNetNPCTalk((objectID) => { if (gws && gws.readyState === 1) gws.send(encCGNPCTalk(objectID)); });
         log(`角色已站入 zone${t.zone} (${t.x},${t.y}) · ${myRace}${mySex ? "(女)" : "(男)"} · 服务器权威移动`, "ok");
       } else {
         renderer.placePlayer(t.x, t.y);                      // 换区/传送落点: 重定位现有角色到新图
@@ -430,6 +432,26 @@ function cancelInvCursor() {
   if (invUI) invUI.clearCursor();
 }
 function refreshInv() { if (invUI && invUI._loaded) invUI.setData(invItems, gearItems); }
+
+// NPC 对话框: 显示服务端直发的 GBK 中文对话(GCNPCSayDynamic)。美术暂用暗金 DOM
+// (开源 npcdialog.spk/npcface 精确布局+头像索引待调研, 按降序先 DOM 手搓; 文本/数据 100% 忠实)。
+let npcDialog = null;
+function ensureNPCDialog() {
+  if (npcDialog) return npcDialog;
+  const d = document.createElement("div"); d.id = "npcDialog";
+  d.style.cssText = "position:absolute;left:50%;bottom:60px;transform:translateX(-50%);z-index:22;display:none;min-width:360px;max-width:520px;padding:14px 18px;background:rgba(20,16,10,.95);border:2px solid #8a6a3a;border-radius:8px;color:#e8d8b0;font:14px/1.8 'Microsoft YaHei',sans-serif;box-shadow:0 4px 20px #000c;pointer-events:auto;";
+  $("game").appendChild(d); npcDialog = d; return d;
+}
+function showNPCDialog(name, message) {
+  const d = ensureNPCDialog();
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  d.innerHTML = `<div style="font-size:15px;color:#ffd87a;border-bottom:1px solid #8a6a3a;margin-bottom:8px;padding-bottom:5px">${esc(name || "NPC")}</div>`
+    + `<div style="white-space:pre-wrap">${esc(message)}</div>`
+    + `<div style="text-align:right;margin-top:10px"><span id="npcClose" style="cursor:pointer;color:#ffd87a;border:1px solid #8a6a3a;border-radius:4px;padding:2px 14px">关闭</span></div>`;
+  d.style.display = "block";
+  $("npcClose").onclick = hideNPCDialog;
+}
+function hideNPCDialog() { if (npcDialog) npcDialog.style.display = "none"; }
 // 地面掉落物: objectID -> {x,y,itemType}(拾取时需 zoneX/zoneY)。换区清空(随 renderer.clearGroundItems)。
 let groundItems = {};
 function firstFreeInvSlot() {                                 // 首个空背包格(10x6, 物品多格尺寸锁dpk暂按1格)
@@ -486,6 +508,15 @@ function onGamePacket(p) {
     renderer.addGroundItem(p.objectID, p.x, p.y, s);
   }
   else if (p.name === "GC_DELETE_AND_PICKUP_OK") { renderer.removeGroundItem(p.objectID); delete groundItems[p.objectID]; } // 拾取成功: 移除地面物
+  // ── NPC 交互 ──
+  else if (p.name === "GC_NPC_SAY_DYNAMIC") {                                                              // NPC 中文对话(服务端直发GBK)
+    const e = renderer._others.get(p.objectID); showNPCDialog(e ? e.name : "NPC", p.message);
+  }
+  else if (p.name === "GC_NPC_RESPONSE") {                                                                 // NPC 响应码
+    if (p.code === 10) hideNPCDialog();                                                                    // QUIT_DIALOGUE: 关对话
+    else log(`◀ NPC响应 code=${p.code}${p.parameter !== undefined ? " param=" + p.parameter : ""}(开界面待实现)`, "info");
+  }
+  else if (p.name === "GC_NPC_ASK" || p.name === "GC_NPC_SAY") { log(`◀ ${p.name} scriptID=${p.scriptID}(脚本文本锁dpk, 暂不显示)`, "info"); }
   // ── 战斗(复刻开源近战流程) ──
   else if (p.name === "GC_ATTACK_MELEE_OK_1") {   // 我命中确认: 自身ModifyInfo(经验/属性/HP) → 状态
     applyMods(p.mods);

@@ -336,6 +336,8 @@ void main(){
   setNetAttack(fn) { this._netAttack = fn; return this; }
   // 点击地面物品→拾取的回调(index.html 设为发 CGAddZoneToInventory)。
   setNetPickup(fn) { this._netPickup = fn; return this; }
+  // 点击 NPC→对话的回调(index.html 设为发 CGNPCTalk)。
+  setNetNPCTalk(fn) { this._netNPCTalk = fn; return this; }
   // 地面掉落物(GCAddNewItemToZone): 在格子建一个可点击 plane。sprite={rgba,width,height}(item.ispk 尽力而为)
   //   则用真图标; 缺省发光黄块(地面图标 frameID 锁 dpk, 按降序降级为 3D 标记)。
   addGroundItem(objectID, col, row, sprite) {
@@ -550,14 +552,16 @@ void main(){
     this.scene.onPointerObservable.add((pi) => {
       if (pi.type !== BABYLON.PointerEventTypes.POINTERPICK) return;
       const p = pi.pickInfo; if (!p || !p.hit) return;
-      // 点到怪物精灵 → 攻击它(面向+发 CG_ATTACK, 本地播攻击动画); 否则点地面寻路移动。
-      if (this._netAttack && p.pickedMesh) {
+      // 点到生物精灵: 怪物→攻击(面向+发 CG_ATTACK+本地攻击动画), NPC→对话(发 CGNPCTalk); 否则点地面寻路。
+      if (p.pickedMesh) {
         for (const [oid, e] of this._others) {
-          if (e.plane === p.pickedMesh && e.kind === "monster") {
+          if (e.plane !== p.pickedMesh) continue;
+          if (e.kind === "monster" && this._netAttack) {
             const pe = this.player;
             if (pe) { pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row)); this.playAction("attack"); }
             this._netAttack(oid); return;
           }
+          if (e.kind === "npc" && this._netNPCTalk) { this._netNPCTalk(oid); return; }
         }
       }
       if (this._netPickup && p.pickedMesh) {                  // 点到地面物品 → 拾取

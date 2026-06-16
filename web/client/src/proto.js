@@ -71,6 +71,15 @@ export const PACKET = {
   CG_ADD_MOUSE_TO_ZONE: 10,       // 丢到地面: ObjectID (加密, ObjID^code)
   CG_ADD_ZONE_TO_INVENTORY: 12,   // 拾取→背包: ObjID+ZoneX+ZoneY+InvenX+InvenY (SHUFFLE_5)
   CG_ADD_ZONE_TO_MOUSE: 13,       // 拾取→光标: ObjID+ZoneX+ZoneY (SHUFFLE_3)
+  // ── NPC 交互 ──
+  CG_NPC_TALK: 55,                // 点NPC对话(明文 ObjectID u32)
+  GC_NPC_SAY_DYNAMIC: 298,        // NPC动态文本(服务端直发GBK中文): ObjID u32+szMsg u8+Message
+  GC_NPC_RESPONSE: 296,           // NPC响应: Code u16(+Param u32, 按包长判断); Code=10 QUIT关对话, 其余多为开界面
+  GC_NPC_ASK: 292,                // NPC脚本菜单: ObjID u32+ScriptID u32+NPCID u16(脚本文本锁dpk)
+  GC_NPC_SAY: 297,                // NPC静态文本(ScriptID, 文本锁dpk)
+  // ── 商店 ──
+  CG_SHOP_REQUEST_LIST: 101,      // 请求商品列表(NPC ObjectID)
+  GC_SHOP_LIST: 345,              // 商品列表(ObjID+Version+RackType+件数+每件...)
 };
 export const NAME = Object.fromEntries(Object.entries(PACKET).map(([k, v]) => [v, k]));
 
@@ -293,6 +302,15 @@ export function encCGAddMouseToZone({ objectID }) {
   const w = new Writer();
   if (_code === 0) w.u32(objectID >>> 0); else w.u32((objectID ^ _code) >>> 0);
   return gframe(PACKET.CG_ADD_MOUSE_TO_ZONE, w.build());
+}
+
+// 点 NPC 对话 CGNPCTalk(55)。★服务端明文读(无加密分支)→ 明文发 ObjectID u32。
+export function encCGNPCTalk(objectID) {
+  return gframe(PACKET.CG_NPC_TALK, new Writer().u32(objectID >>> 0).build());
+}
+// 请求商店列表 CGShopRequestList(101): NPC ObjectID。(加密待 M3b 核对, 暂明文)
+export function encCGShopRequestList(objectID) {
+  return gframe(PACKET.CG_SHOP_REQUEST_LIST, new Writer().u32(objectID >>> 0).build());
 }
 
 // 聊天(明文 UTF-8; 服务器只转发字节, 网页端之间中文可通)。消息字节 ≤128(服务器限制)。
@@ -608,6 +626,16 @@ export function decode(u8) {
       out.silver = r.u16(); out.grade = r.i32(); out.durability = r.u32(); out.enchant = (r.u8() << 24 >> 24); out.num = r.u8();
       const sub = r.u8(); out.sub = []; for (let i = 0; i < sub; i++) out.sub.push({ objectID: r.u32(), itemClass: r.u8(), itemType: r.u16(), num: r.u8(), slotID: r.u8() });
     }
+    // ── NPC 交互 ──
+    // NPC 动态对话(服务端直发 GBK 中文): ObjectID + szMsg + Message。这是 M3 对话的主体, 不依赖 dpk。
+    else if (id === PACKET.GC_NPC_SAY_DYNAMIC) {
+      out.objectID = r.u32(); const n = r.u8(); const mb = []; for (let i = 0; i < n; i++) mb.push(r.u8()); out.message = gbkDecode(mb);
+    }
+    // NPC 响应码: Code u16 (+Parameter u32, 按包长判断——某些 Code 才带)。Code=10 关对话框。
+    else if (id === PACKET.GC_NPC_RESPONSE) { out.code = r.u16(); if (size >= 6) out.parameter = r.u32(); }
+    // NPC 脚本菜单/静态文本: 文本按 ScriptID 查客户端 NPCScript.inf(锁 dpk) → 仅解析结构, 文本暂缺。
+    else if (id === PACKET.GC_NPC_ASK) { out.objectID = r.u32(); out.scriptID = r.u32(); out.npcID = r.u16(); }
+    else if (id === PACKET.GC_NPC_SAY) { out.objectID = r.u32(); out.scriptID = r.u32(); out.subjectID = r.u8(); }
   } catch (e) { out._err = e.message; }
   return out;
 }
