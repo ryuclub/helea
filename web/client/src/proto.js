@@ -59,6 +59,7 @@ export const PACKET = {
   GC_CREATE_ITEM: 224,            // 物品入背包: 字段≠PCItemInfo(无MainColor/sub) +InvenX,InvenY
   GC_DELETE_INVENTORY_ITEM: 231,  // 删背包格: ObjectID
   GC_ADD_GEAR_TO_INVENTORY: 177,  // 装备→背包(卸下确认): SlotID+InvenX+InvenY
+  GC_ADD_ITEM_TO_ZONE: 182,       // 地面已有物品(入世下发): 同 187 结构
   GC_ADD_NEW_ITEM_TO_ZONE: 187,   // 地面新掉落: SHUFFLE_5(ObjID,X,Y,IClass,IType)+...
   GC_DELETE_AND_PICKUP_OK: 229,   // 拾取确认(给自己): ObjectID(移除地面物件)
   GC_CANNOT_ADD: 218,             // 操作失败: ObjectID(乐观更新回滚)
@@ -211,6 +212,63 @@ export function encCGAttack({ targetID, x, y, dir }) {
     else { D2(); A(); C(); B(); }
   }
   return gframe(PACKET.CG_ATTACK, w.build());
+}
+
+// ───── 物品/背包/装备 操作(CG) ─────
+// ★加密注意(已逐包核对服务端 read): CG 4/7/8 服务端按明文读(无加密分支)→ 即使 in-world code≠0 也必须明文发;
+//   3/10 加密(整值^code 仅低字节, 无 shuffle); 12 SHUFFLE_5; 13 SHUFFLE_3。每字段按其宽度异或低字节。
+
+// 拾取地面→背包格 CGAddZoneToInventory(12)。SHUFFLE_5(A=ObjID u32,B=ZoneX,C=ZoneY,D=InvenX,E=InvenY)。
+export function encCGAddZoneToInventory({ objectID, zoneX, zoneY, invenX, invenY }) {
+  const w = new Writer();
+  if (_code === 0) { w.u32(objectID >>> 0).u8(zoneX).u8(zoneY).u8(invenX).u8(invenY); }
+  else {
+    const c = _code;
+    const A = () => w.u32((objectID ^ c) >>> 0), B = () => w.u8(zoneX ^ c), C = () => w.u8(zoneY ^ c), D = () => w.u8(invenX ^ c), E = () => w.u8(invenY ^ c);
+    const m = c % 5;
+    if (m === 0) { A(); B(); C(); D(); E(); }
+    else if (m === 1) { B(); C(); D(); E(); A(); }
+    else if (m === 2) { C(); D(); E(); A(); B(); }
+    else if (m === 3) { D(); E(); B(); A(); C(); }
+    else { E(); C(); D(); A(); B(); }
+  }
+  return gframe(PACKET.CG_ADD_ZONE_TO_INVENTORY, w.build());
+}
+// 拾取地面→光标 CGAddZoneToMouse(13)。SHUFFLE_3(A=ObjID,B=ZoneX,C=ZoneY)。
+export function encCGAddZoneToMouse({ objectID, zoneX, zoneY }) {
+  const w = new Writer();
+  if (_code === 0) { w.u32(objectID >>> 0).u8(zoneX).u8(zoneY); }
+  else {
+    const c = _code;
+    const A = () => w.u32((objectID ^ c) >>> 0), B = () => w.u8(zoneX ^ c), C = () => w.u8(zoneY ^ c);
+    const m = c % 3;
+    if (m === 0) { A(); B(); C(); } else if (m === 1) { B(); C(); A(); } else { C(); A(); B(); }
+  }
+  return gframe(PACKET.CG_ADD_ZONE_TO_MOUSE, w.build());
+}
+// 背包格→光标 CGAddInventoryToMouse(4) / 光标→背包格 CGAddMouseToInventory(8)。★服务端明文读, 永远明文发。
+export function encCGAddInventoryToMouse({ objectID, invenX, invenY }) {
+  return gframe(PACKET.CG_ADD_INVENTORY_TO_MOUSE, new Writer().u32(objectID >>> 0).u8(invenX).u8(invenY).build());
+}
+export function encCGAddMouseToInventory({ objectID, invenX, invenY }) {
+  return gframe(PACKET.CG_ADD_MOUSE_TO_INVENTORY, new Writer().u32(objectID >>> 0).u8(invenX).u8(invenY).build());
+}
+// 光标→装备槽(穿) CGAddMouseToGear(7)。★服务端明文读, 永远明文发。
+export function encCGAddMouseToGear({ objectID, slotID }) {
+  return gframe(PACKET.CG_ADD_MOUSE_TO_GEAR, new Writer().u32(objectID >>> 0).u8(slotID).build());
+}
+// 装备槽→光标(卸) CGAddGearToMouse(3)。加密(整值^code 仅低字节, 无 shuffle)。
+export function encCGAddGearToMouse({ objectID, slotID }) {
+  const w = new Writer();
+  if (_code === 0) w.u32(objectID >>> 0).u8(slotID);
+  else w.u32((objectID ^ _code) >>> 0).u8(slotID ^ _code);
+  return gframe(PACKET.CG_ADD_GEAR_TO_MOUSE, w.build());
+}
+// 光标→地面(丢) CGAddMouseToZone(10)。加密(ObjID^code, 无 shuffle)。
+export function encCGAddMouseToZone({ objectID }) {
+  const w = new Writer();
+  if (_code === 0) w.u32(objectID >>> 0); else w.u32((objectID ^ _code) >>> 0);
+  return gframe(PACKET.CG_ADD_MOUSE_TO_ZONE, w.build());
 }
 
 // 聊天(明文 UTF-8; 服务器只转发字节, 网页端之间中文可通)。消息字节 ≤128(服务器限制)。
@@ -505,6 +563,27 @@ export function decode(u8) {
     else if (id === PACKET.GC_ADD_GEAR_TO_INVENTORY) { out.slotID = r.u8(); out.invenX = r.u8(); out.invenY = r.u8(); } // 卸装: 槽SlotID→背包(X,Y)
     else if (id === PACKET.GC_DELETE_AND_PICKUP_OK) { out.objectID = r.u32(); }                            // 拾取确认: 移除地面物件
     else if (id === PACKET.GC_CANNOT_ADD) { out.objectID = r.u32(); }                                      // 操作失败: 回滚
+    // 地面新掉落 GCAddNewItemToZone(187): 前5字段 SHUFFLE_5(ObjID u32,X u8,Y u8,IClass u8,IType u16, 各^code),
+    //   其余明文: optSize+opt, Silver u16, Grade i32, Durability u32, Ench i8, ItemNum u8, subCount+sub(9B)。
+    //   ★字段序 Silver,Grade,Durability(≠PCItemInfo), 无 MainColor。
+    else if (id === PACKET.GC_ADD_NEW_ITEM_TO_ZONE || id === PACKET.GC_ADD_ITEM_TO_ZONE) {
+      const c = _code;
+      const rU32 = () => (c ? ((r.u32() ^ c) >>> 0) : r.u32());
+      const rU16 = () => (c ? ((r.u16() ^ c) & 0xffff) : r.u16());
+      const rU8 = () => (c ? ((r.u8() ^ c) & 0xff) : r.u8());
+      let A, B, C, D, E;   // A=ObjID,B=X,C=Y,D=IClass,E=IType
+      const rA = () => (A = rU32()), rB = () => (B = rU8()), rC = () => (C = rU8()), rD = () => (D = rU8()), rE = () => (E = rU16());
+      const m = c % 5;
+      if (m === 0) { rA(); rB(); rC(); rD(); rE(); }
+      else if (m === 1) { rB(); rC(); rD(); rE(); rA(); }
+      else if (m === 2) { rC(); rD(); rE(); rA(); rB(); }
+      else if (m === 3) { rD(); rE(); rB(); rA(); rC(); }
+      else { rE(); rC(); rD(); rA(); rB(); }
+      out.objectID = A; out.x = B; out.y = C; out.itemClass = D; out.itemType = E;
+      const opt = r.u8(); out.options = []; for (let i = 0; i < opt; i++) out.options.push(r.u8());
+      out.silver = r.u16(); out.grade = r.i32(); out.durability = r.u32(); out.enchant = (r.u8() << 24 >> 24); out.num = r.u8();
+      const sub = r.u8(); out.sub = []; for (let i = 0; i < sub; i++) out.sub.push({ objectID: r.u32(), itemClass: r.u8(), itemType: r.u16(), num: r.u8(), slotID: r.u8() });
+    }
   } catch (e) { out._err = e.message; }
   return out;
 }

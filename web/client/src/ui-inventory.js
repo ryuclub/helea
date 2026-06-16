@@ -83,6 +83,7 @@ export class InventoryUI {
   _mkCanvas() {
     this.invCv = this._canvas(this.invPack.width(0) || 220, this.invPack.height(0) || 220, "left:40px");
     this.gearCv = this._canvas(this.gearWin.width(0) || 230, this.gearWin.height(0) || 420, "right:40px");
+    this._installEvents();
   }
   _canvas(w, h, pos) {
     const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
@@ -90,7 +91,7 @@ export class InventoryUI {
     this.container.appendChild(cv); return cv;
   }
 
-  setData(inv, gear) { this.inv = inv || []; this.gear = gear || []; if (this.visible) this._render(); }
+  setData(inv, gear) { this.inv = inv || []; this.gear = gear || []; if (this.visible) this._render(); }   // 光标跨操作保留(换区由 index 清)
   toggle() {
     this.visible = !this.visible;
     this._applyVisibility();
@@ -142,4 +143,42 @@ export class InventoryUI {
       }
     }
   }
+
+  // ───── 交互(光标持物两次点击 = 协议两包: 拿起→放下/穿/卸) ─────
+  // ★数据权威在 index(invItems/gearItems): 点击仅触发 onAction(action,payload), 由 index 改数据+发包+
+  //   refreshInv(setData 刷新本 UI)+控制光标(setCursor/clearCursor)。本类不直接改 inv/gear, 避免与 index 不一致。
+  setActionHandler(fn) { this.onAction = fn; }
+  _installEvents() {
+    this.cursorEl = document.createElement("div");
+    this.cursorEl.style.cssText = "position:fixed;z-index:30;pointer-events:none;display:none;";
+    document.body.appendChild(this.cursorEl);
+    document.addEventListener("mousemove", (e) => { if (this.cursor) { this.cursorEl.style.left = (e.clientX + 6) + "px"; this.cursorEl.style.top = (e.clientY + 6) + "px"; } });
+    this.invCv.addEventListener("click", (e) => this._clickInv(e.offsetX / SCALE, e.offsetY / SCALE));
+    this.gearCv.addEventListener("click", (e) => this._clickGear(e.offsetX / SCALE, e.offsetY / SCALE));
+  }
+  _clickInv(px, py) {
+    const inv = INV[this.race] || INV.slayer;
+    const col = Math.floor((px - inv.x0) / CELL), row = Math.floor((py - inv.y0) / CELL);
+    if (col < 0 || col >= GRID_COLS || row < 0 || row >= GRID_ROWS || !this.onAction) return;
+    if (this.cursor) this.onAction("dropInv", { col, row });                                 // 放下到背包格
+    else { const it = this.inv.find((t) => t.invenX === col && t.invenY === row); if (it) this.onAction("pickInv", { item: it }); } // 拿起
+  }
+  _clickGear(px, py) {
+    const gear = GEAR[this.race] || GEAR.slayer;
+    const sl = gear.slots.find((s) => px >= s.x && px < s.x + s.w && py >= s.y && py < s.y + s.h);
+    if (!sl || !this.onAction) return;
+    if (this.cursor) this.onAction("dropGear", { slotID: sl.id });                           // 穿到该槽
+    else { const it = this.gear.find((t) => t.slotID === sl.id); if (it) this.onAction("pickGear", { item: it }); } // 卸下
+  }
+  // 光标视觉(index 控制持物状态): 画物品图标跟随鼠标。
+  setCursor(item) {
+    this.cursor = item;
+    const fid = this._frame(item), s = this.itemPack && this.itemPack.get(fid);
+    const cv = document.createElement("canvas");
+    if (s && s.width) { cv.width = s.width; cv.height = s.height; this.itemPack.blit(cv.getContext("2d"), 0, 0, fid); }
+    else { cv.width = CELL; cv.height = CELL; const x = cv.getContext("2d"); x.fillStyle = "rgba(110,82,40,.9)"; x.fillRect(0, 0, CELL, CELL); }
+    cv.style.cssText = `width:${cv.width * SCALE}px;height:${cv.height * SCALE}px;image-rendering:pixelated;`;
+    this.cursorEl.innerHTML = ""; this.cursorEl.appendChild(cv); this.cursorEl.style.display = "block";
+  }
+  clearCursor() { this.cursor = null; if (this.cursorEl) this.cursorEl.style.display = "none"; }
 }

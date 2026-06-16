@@ -41,6 +41,7 @@ export class GameRenderer {
     this.canvas = canvas; this.entities = [];
     this._others = new Map();        // objectID -> 其他玩家/怪物/NPC 实体(复用主角精灵管线)
     this._floaters = [];             // 飘字(伤害数字): {x,y,z(世界), text, t0, color}
+    this._groundItems = new Map();   // objectID -> 地面掉落物 {plane,mat,col,row}
     this._walls = [];                // 可透明墙(bTrans)网格 {mesh,gx,gy,w,h,vpRow}: 角色走到墙后→半透明(开源 IsWallTransPosition)
     this._blocks = new Map();        // "bx,by" -> {bx,by,ground,buildings:[],loading}
     this._blockLoader = null; this._map = null;   // 在途块数从 _blocks 里 loading:true 实时统计(无独立计数器)
@@ -260,6 +261,7 @@ void main(){
     this._walls.length = 0;
     if (this.player) { this.player.stepping = false; this._awaitingMove = false; this.path = null; }
     for (const id of [...this._others.keys()]) this.removeOther(id);
+    this.clearGroundItems();                                  // 换区: 清旧区地面掉落物
   }
   // 仅清其他玩家(重连时旧 objectID 失效, 保留地形)。
   clearOthers() { for (const id of [...this._others.keys()]) this.removeOther(id); }
@@ -332,6 +334,33 @@ void main(){
   setOtherHP(objectID, hp, maxHP) { const e = this._others.get(objectID); if (e) { e.hp = hp; if (maxHP != null) e.maxHP = maxHP; } }
   // 点击怪物→攻击的回调(index.html 设为发 CG_ATTACK)。
   setNetAttack(fn) { this._netAttack = fn; return this; }
+  // 点击地面物品→拾取的回调(index.html 设为发 CGAddZoneToInventory)。
+  setNetPickup(fn) { this._netPickup = fn; return this; }
+  // 地面掉落物(GCAddNewItemToZone): 在格子建一个可点击 plane。sprite={rgba,width,height}(item.ispk 尽力而为)
+  //   则用真图标; 缺省发光黄块(地面图标 frameID 锁 dpk, 按降序降级为 3D 标记)。
+  addGroundItem(objectID, col, row, sprite) {
+    const B = BABYLON;
+    if (this._groundItems.has(objectID)) this.removeGroundItem(objectID);
+    let w = TW * 0.5, h = TW * 0.5;
+    if (sprite && sprite.rgba) { w = sprite.width; h = sprite.height; }
+    const plane = B.MeshBuilder.CreatePlane("gi", { width: w, height: h }, this.scene);
+    const wp = this._gw(col * TW + TW / 2, row * TH + TH / 2);
+    plane.position = new B.Vector3(wp.x, wp.y, -1);          // 略前于地面, 可被 pick
+    const mat = new B.StandardMaterial("gim", this.scene); mat.disableLighting = true; mat.specularColor = B.Color3.Black();
+    if (sprite && sprite.rgba) {
+      const tx = B.RawTexture.CreateRGBATexture(sprite.rgba, sprite.width, sprite.height, this.scene, false, true, B.Texture.NEAREST_SAMPLINGMODE);
+      tx.hasAlpha = true; mat.diffuseTexture = tx; mat.emissiveColor = new B.Color3(1, 1, 1);
+      mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST;
+    } else { mat.emissiveColor = new B.Color3(1, 0.85, 0.2); mat.alpha = 0.85; }
+    plane.material = mat;
+    this._groundItems.set(objectID, { plane, mat });
+  }
+  removeGroundItem(objectID) {
+    const g = this._groundItems.get(objectID); if (!g) return;
+    try { g.mat.diffuseTexture && g.mat.diffuseTexture.dispose(); g.mat.dispose(); g.plane.dispose(); } catch {}
+    this._groundItems.delete(objectID);
+  }
+  clearGroundItems() { for (const id of [...this._groundItems.keys()]) this.removeGroundItem(id); }
   // 某生物播一次攻击动画(GC_ATTACK 广播; 自己的攻击由本地 playAction 处理)。
   otherAttack(objectID) { const e = this._others.get(objectID); if (e && e.anim.attack) { e._atkUntil = performance.now() + 450; } }
   // 某生物 HP 更新到绝对值(服务端 GC_STATUS_CURRENT_HP 广播被击者新HP)。
@@ -529,6 +558,11 @@ void main(){
             if (pe) { pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row)); this.playAction("attack"); }
             this._netAttack(oid); return;
           }
+        }
+      }
+      if (this._netPickup && p.pickedMesh) {                  // 点到地面物品 → 拾取
+        for (const [oid, g] of this._groundItems) {
+          if (g.plane === p.pickedMesh) { this._netPickup(oid); return; }
         }
       }
       const { col, row } = this._worldToTile(p.pickedPoint);

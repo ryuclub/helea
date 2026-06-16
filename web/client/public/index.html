@@ -76,6 +76,7 @@ import { CharCreateScreen } from "../src/ui-charcreate.js";
 import { HudHpBar } from "../src/ui-hud.js";
 import { InventoryUI } from "../src/ui-inventory.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
+  encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 
 const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
@@ -228,6 +229,12 @@ async function placePlayerAt(x, y) {
         renderer.setNetMove((dir, cx, cy) => { if (gws && gws.readyState === 1) gws.send(encCGMove({ dir, x: cx, y: cy })); });
         // 普攻: 点怪 → 渲染器回调送 CG_ATTACK(目标ObjectID + 我当前格/朝向, 加密 SHUFFLE_4)。
         renderer.setNetAttack((targetID) => { if (gws && gws.readyState === 1 && player) gws.send(encCGAttack({ targetID, x: player.col, y: player.row, dir: player.dir })); });
+        // 点地面物品 → 拾取: 找首个空背包格, 发 CGAddZoneToInventory(SHUFFLE_5)。服务端回 GCCreateItem(入包)+GCDeleteAndPickupOK(移除地面)。
+        renderer.setNetPickup((objectID) => {
+          const g = groundItems[objectID]; if (!g) return;
+          const slot = firstFreeInvSlot(); if (!slot) { log("背包已满, 无法拾取", "err"); return; }
+          if (gws && gws.readyState === 1) gws.send(encCGAddZoneToInventory({ objectID, zoneX: g.x, zoneY: g.y, invenX: slot.x, invenY: slot.y }));
+        });
         log(`角色已站入 zone${t.zone} (${t.x},${t.y}) · ${myRace}${mySex ? "(女)" : "(男)"} · 服务器权威移动`, "ok");
       } else {
         renderer.placePlayer(t.x, t.y);                      // 换区/传送落点: 重定位现有角色到新图
@@ -379,15 +386,63 @@ window.addEventListener("keydown", (e) => {
 // 背包/装备状态(协议忠实维护) + 开源资源 UI(inventory/gear spk)。
 let invItems = [], gearItems = [], invUI = null;
 function ensureInvUI() {
-  if (!invUI && myRace) { invUI = new InventoryUI($("game")); invUI.load(myRace).then(() => invUI.setData(invItems, gearItems)).catch((e) => { log("背包UI加载失败: " + e.message, "err"); invUI = null; }); }
+  if (!invUI && myRace) {
+    invUI = new InventoryUI($("game"));
+    invUI.setActionHandler(onInvAction);                       // 注册: 操作→发对应 CG 包
+    invUI.load(myRace).then(() => invUI.setData(invItems, gearItems)).catch((e) => { log("背包UI加载失败: " + e.message, "err"); invUI = null; });
+  }
   return invUI;
 }
+// 背包/装备操作: 光标中转两次点击 = 协议两包(拿起 InvToMouse/GearToMouse → 放下 MouseToInv/MouseToGear)。
+// 数据权威在此(invItems/gearItems): 乐观更新 + 发包 + refreshInv + 控制 UI 光标。成功服务端无搬移回包;
+// 失败回 GCCannotAdd → cancelInvCursor 把光标物放回原位。★加密: 4/8/7 明文, 3 加密(见 proto.js)。
+let invCursorItem = null, invCursorFrom = null;
+function onInvAction(action, p) {
+  const send = (b) => { if (gws && gws.readyState === 1) gws.send(b); };
+  if (action === "pickInv") {
+    const it = p.item; invCursorItem = it; invCursorFrom = { type: "inv", x: it.invenX, y: it.invenY };
+    invItems = invItems.filter((t) => t !== it); send(encCGAddInventoryToMouse({ objectID: it.objectID, invenX: it.invenX, invenY: it.invenY }));
+    refreshInv(); invUI.setCursor(it);
+  } else if (action === "pickGear") {
+    const it = p.item; invCursorItem = it; invCursorFrom = { type: "gear", slotID: it.slotID };
+    gearItems = gearItems.filter((t) => t !== it); send(encCGAddGearToMouse({ objectID: it.objectID, slotID: it.slotID }));
+    refreshInv(); invUI.setCursor(it);
+  } else if (action === "dropInv") {
+    if (!invCursorItem) return; const it = invCursorItem;
+    it.invenX = p.col; it.invenY = p.row; delete it.slotID; invItems.push(it);
+    send(encCGAddMouseToInventory({ objectID: it.objectID, invenX: p.col, invenY: p.row }));
+    invCursorItem = null; invCursorFrom = null; refreshInv(); invUI.clearCursor();
+  } else if (action === "dropGear") {
+    if (!invCursorItem) return; const it = invCursorItem;
+    it.slotID = p.slotID; delete it.invenX; delete it.invenY; gearItems.push(it);
+    send(encCGAddMouseToGear({ objectID: it.objectID, slotID: p.slotID }));
+    invCursorItem = null; invCursorFrom = null; refreshInv(); invUI.clearCursor();
+  }
+}
+// 操作失败(GCCannotAdd)或换区: 光标物品放回原位。
+function cancelInvCursor() {
+  if (invCursorItem) {
+    const it = invCursorItem;
+    if (invCursorFrom.type === "inv") { it.invenX = invCursorFrom.x; it.invenY = invCursorFrom.y; delete it.slotID; invItems.push(it); }
+    else { it.slotID = invCursorFrom.slotID; delete it.invenX; delete it.invenY; gearItems.push(it); }
+    invCursorItem = null; invCursorFrom = null; refreshInv();
+  }
+  if (invUI) invUI.clearCursor();
+}
 function refreshInv() { if (invUI && invUI._loaded) invUI.setData(invItems, gearItems); }
+// 地面掉落物: objectID -> {x,y,itemType}(拾取时需 zoneX/zoneY)。换区清空(随 renderer.clearGroundItems)。
+let groundItems = {};
+function firstFreeInvSlot() {                                 // 首个空背包格(10x6, 物品多格尺寸锁dpk暂按1格)
+  const occ = new Set(invItems.map((it) => it.invenY * 10 + it.invenX));
+  for (let y = 0; y < 6; y++) for (let x = 0; x < 10; x++) if (!occ.has(y * 10 + x)) return { x, y };
+  return null;
+}
 
 function onGamePacket(p) {
   if (p.name === "GC_UPDATE_INFO") {
     if (p.curHP !== undefined) { hpmp.hp = p.curHP; hpmp.hpMax = p.maxHP || 1; hpmp.mp = p.curMP; hpmp.mpMax = p.maxMP || 1; updateHud(); applyCharFull(p); }
-    if (p.inventory) { invItems = p.inventory; gearItems = p.gear || []; ensureInvUI(); refreshInv(); }   // 入世/换区: 全量背包+装备
+    if (p.inventory) { invCursorItem = null; invCursorFrom = null; if (invUI) invUI.clearCursor(); invItems = p.inventory; gearItems = p.gear || []; ensureInvUI(); refreshInv(); }  // 入世/换区: 全量背包+装备, 清光标
+    groundItems = {};                                                                                      // 换区: 清地面物数据(plane 由 renderer.clearGroundItems 清)
     // 真实 zone: 从包解析(三族均对真实包核对)。决定加密 code + 加载哪张图(含传送换区)。
     const parsed = (p.zoneID && ZONEMAP[p.zoneID]) ? p.zoneID : null;
     if (parsed === null && player) {
@@ -416,14 +471,21 @@ function onGamePacket(p) {
   else if (p.name === "GC_ADD_SLAYER" || p.name === "GC_ADD_VAMPIRE" || p.name === "GC_ADD_OUSTERS") { addOtherPlayer(p.creature); }
   else if (p.name === "GC_ADD_MONSTER" || p.name === "GC_ADD_NPC") { addCreature(p.creature); }   // 怪物/NPC 进入视野
   else if (p.name === "GC_MOVE") { renderer.otherStep(p.objectID, p.x, p.y, p.dir); }   // 他人移动
-  else if (p.name === "GC_DELETE_OBJECT") { renderer.removeOther(p.objectID); }          // 他人离开视野
+  else if (p.name === "GC_DELETE_OBJECT") { renderer.removeOther(p.objectID); if (groundItems[p.objectID]) { renderer.removeGroundItem(p.objectID); delete groundItems[p.objectID]; } }  // 他人离开/地面物被他人捡走
   // ── 物品/背包/装备(增量) ──
   else if (p.name === "GC_CREATE_ITEM") { invItems.push(p.item); refreshInv(); }                         // 物品入背包格
   else if (p.name === "GC_DELETE_INVENTORY_ITEM") { invItems = invItems.filter((it) => it.objectID !== p.objectID); refreshInv(); } // 删背包格
-  else if (p.name === "GC_ADD_GEAR_TO_INVENTORY") {                                                       // 卸装: 槽SlotID→背包(X,Y)
+  else if (p.name === "GC_ADD_GEAR_TO_INVENTORY") {                                                       // 卸装: 槽SlotID→背包(X,Y)。乐观更新已移走时幂等跳过
     const i = gearItems.findIndex((it) => it.slotID === p.slotID);
     if (i >= 0) { const it = gearItems[i]; gearItems.splice(i, 1); it.invenX = p.invenX; it.invenY = p.invenY; delete it.slotID; invItems.push(it); refreshInv(); }
   }
+  else if (p.name === "GC_CANNOT_ADD") { cancelInvCursor(); }                                              // 操作失败: 光标物品回原位
+  else if (p.name === "GC_ADD_NEW_ITEM_TO_ZONE" || p.name === "GC_ADD_ITEM_TO_ZONE") {                     // 地面掉落物(新掉/入世已有)
+    groundItems[p.objectID] = { x: p.x, y: p.y, itemType: p.itemType };
+    const s = (invUI && invUI.itemPack) ? invUI.itemPack.get(p.itemType) : null;                          // item.ispk 尽力而为图标, 缺则黄块
+    renderer.addGroundItem(p.objectID, p.x, p.y, s);
+  }
+  else if (p.name === "GC_DELETE_AND_PICKUP_OK") { renderer.removeGroundItem(p.objectID); delete groundItems[p.objectID]; } // 拾取成功: 移除地面物
   // ── 战斗(复刻开源近战流程) ──
   else if (p.name === "GC_ATTACK_MELEE_OK_1") {   // 我命中确认: 自身ModifyInfo(经验/属性/HP) → 状态
     applyMods(p.mods);
