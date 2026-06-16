@@ -7,7 +7,7 @@
 //
 // 一个 UIPack 对应一个 C_SPRITE_PACK 实例: get/width/height/blit/blitClip 一一对应开源接口。
 
-import { decodeCSprite, parseSpki } from "./spk.js";
+import { decodeCSprite, decodeCIndexSprite, parseSpki } from "./spk.js";
 import { fetchBuf } from "./pack.js";
 
 const _packCache = new Map(); // name -> Promise<UIPack>
@@ -51,5 +51,20 @@ export function loadUIPack(name, base = "/ui/spk") {
     return new UIPack(name, sprites);
   })();
   _packCache.set(name, pr);
+  return pr;
+}
+
+// 物品图标包(item.ispk / .ispki, CIndexSprite 格式; 经 /item/ 路由)。复用 UIPack(get/width/height/blit)。
+// 注意是 CIndexSprite(不是 CSprite); 帧数较多(item ≈3050), 一次性解码后缓存。
+export function loadItemPack(name = "item", base = "/item") {
+  const key = "item:" + name;
+  if (_packCache.has(key)) return _packCache.get(key);
+  const pr = (async () => {
+    const [spk, spki] = await Promise.all([fetchBuf(`${base}/${name}.ispk`), fetchBuf(`${base}/${name}.ispki`)]);
+    const offsets = parseSpki(spki);
+    const sprites = offsets.map((o) => { try { const s = decodeCIndexSprite(spk, o); return { width: s.width, height: s.height, rgba: s.rgba }; } catch { return null; } });
+    return new UIPack(name, sprites);
+  })();
+  _packCache.set(key, pr);
   return pr;
 }

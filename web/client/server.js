@@ -9,6 +9,8 @@ const ROOT = import.meta.dirname;
 const PORT = Number(process.env.PORT || 8095);
 // 开源界面资源(发行包 Data/Ui): UI spk/spki/ifr 真实美术与布局, 直接按原始路径服务(不复制)。
 const UIROOT = path.resolve(ROOT, "..", "..", "DarkEden Legend New Version April 2026", "Data", "Ui");
+// 物品图标资源(发行包 Data/new_item): item.ispk/.ispki 等, 直接按原始路径服务(不复制)。
+const ITEMROOT = path.resolve(ROOT, "..", "..", "DarkEden Legend New Version April 2026", "Data", "new_item");
 
 // 通过 docker exec 跑 mysql。id/password 已严格限定 [A-Za-z0-9], 无注入风险。
 function mysql(sql) {
@@ -86,6 +88,9 @@ http.createServer((req, res) => {
   if (p.startsWith("/ui/")) {
     file = path.join(UIROOT, p.slice(4));
     if (!file.startsWith(UIROOT)) { res.writeHead(404); res.end("404"); return; }
+  } else if (p.startsWith("/item/")) {                          // 物品图标: /item/item.ispk → Data/new_item/
+    file = path.join(ITEMROOT, p.slice(6));
+    if (!file.startsWith(ITEMROOT)) { res.writeHead(404); res.end("404"); return; }
   } else {
     file = path.join(ROOT, p);
     if (!file.startsWith(ROOT)) { res.writeHead(404); res.end("404"); return; }

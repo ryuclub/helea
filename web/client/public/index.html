@@ -74,6 +74,7 @@ import { LoginScreen } from "../src/ui-login.js";
 import { CharSelectScreen } from "../src/ui-charselect.js";
 import { CharCreateScreen } from "../src/ui-charcreate.js";
 import { HudHpBar } from "../src/ui-hud.js";
+import { InventoryUI } from "../src/ui-inventory.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 
@@ -372,10 +373,21 @@ function updateCharPanel() {
 window.addEventListener("keydown", (e) => {
   if (e.target && e.target.tagName === "INPUT") return;          // 聊天/输入聚焦时不触发
   if (e.key === "c" || e.key === "C") { const d = ensureCharPanel(); d.style.display = d.style.display === "none" ? "block" : "none"; updateCharPanel(); }
+  else if (e.key === "i" || e.key === "I") { const ui = ensureInvUI(); if (ui) ui.toggle(); }   // 背包/装备开关
 });
+
+// 背包/装备状态(协议忠实维护) + 开源资源 UI(inventory/gear spk)。
+let invItems = [], gearItems = [], invUI = null;
+function ensureInvUI() {
+  if (!invUI && myRace) { invUI = new InventoryUI($("game")); invUI.load(myRace).then(() => invUI.setData(invItems, gearItems)).catch((e) => { log("背包UI加载失败: " + e.message, "err"); invUI = null; }); }
+  return invUI;
+}
+function refreshInv() { if (invUI && invUI._loaded) invUI.setData(invItems, gearItems); }
+
 function onGamePacket(p) {
   if (p.name === "GC_UPDATE_INFO") {
     if (p.curHP !== undefined) { hpmp.hp = p.curHP; hpmp.hpMax = p.maxHP || 1; hpmp.mp = p.curMP; hpmp.mpMax = p.maxMP || 1; updateHud(); applyCharFull(p); }
+    if (p.inventory) { invItems = p.inventory; gearItems = p.gear || []; ensureInvUI(); refreshInv(); }   // 入世/换区: 全量背包+装备
     // 真实 zone: 从包解析(三族均对真实包核对)。决定加密 code + 加载哪张图(含传送换区)。
     const parsed = (p.zoneID && ZONEMAP[p.zoneID]) ? p.zoneID : null;
     if (parsed === null && player) {
@@ -405,6 +417,13 @@ function onGamePacket(p) {
   else if (p.name === "GC_ADD_MONSTER" || p.name === "GC_ADD_NPC") { addCreature(p.creature); }   // 怪物/NPC 进入视野
   else if (p.name === "GC_MOVE") { renderer.otherStep(p.objectID, p.x, p.y, p.dir); }   // 他人移动
   else if (p.name === "GC_DELETE_OBJECT") { renderer.removeOther(p.objectID); }          // 他人离开视野
+  // ── 物品/背包/装备(增量) ──
+  else if (p.name === "GC_CREATE_ITEM") { invItems.push(p.item); refreshInv(); }                         // 物品入背包格
+  else if (p.name === "GC_DELETE_INVENTORY_ITEM") { invItems = invItems.filter((it) => it.objectID !== p.objectID); refreshInv(); } // 删背包格
+  else if (p.name === "GC_ADD_GEAR_TO_INVENTORY") {                                                       // 卸装: 槽SlotID→背包(X,Y)
+    const i = gearItems.findIndex((it) => it.slotID === p.slotID);
+    if (i >= 0) { const it = gearItems[i]; gearItems.splice(i, 1); it.invenX = p.invenX; it.invenY = p.invenY; delete it.slotID; invItems.push(it); refreshInv(); }
+  }
   // ── 战斗(复刻开源近战流程) ──
   else if (p.name === "GC_ATTACK_MELEE_OK_1") {   // 我命中确认: 自身ModifyInfo(经验/属性/HP) → 状态
     applyMods(p.mods);

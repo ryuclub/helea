@@ -54,6 +54,22 @@ export const PACKET = {
   GC_SAY: 335,
   // 属性变化(HP/MP/STR…): ShortList{type u8,value u16}+LongList{type u8,value u32}; HP/MP type=12~15
   GC_MODIFY_INFORMATION: 275,
+  // ── 物品/背包/装备 ──
+  // GC(服务端→客户端, 明文; AddNewItemToZone 前5字段 SHUFFLE_5):
+  GC_CREATE_ITEM: 224,            // 物品入背包: 字段≠PCItemInfo(无MainColor/sub) +InvenX,InvenY
+  GC_DELETE_INVENTORY_ITEM: 231,  // 删背包格: ObjectID
+  GC_ADD_GEAR_TO_INVENTORY: 177,  // 装备→背包(卸下确认): SlotID+InvenX+InvenY
+  GC_ADD_NEW_ITEM_TO_ZONE: 187,   // 地面新掉落: SHUFFLE_5(ObjID,X,Y,IClass,IType)+...
+  GC_DELETE_AND_PICKUP_OK: 229,   // 拾取确认(给自己): ObjectID(移除地面物件)
+  GC_CANNOT_ADD: 218,             // 操作失败: ObjectID(乐观更新回滚)
+  // CG(客户端→服务端): ★4/7/8 明文不加密不shuffle; 3/10 加密无shuffle; 12 SHUFFLE_5; 13/137 SHUFFLE_3
+  CG_ADD_GEAR_TO_MOUSE: 3,        // 卸装: ObjectID+SlotID (加密, ObjID^code)
+  CG_ADD_INVENTORY_TO_MOUSE: 4,   // 背包→光标: ObjectID+InvenX+InvenY (明文)
+  CG_ADD_MOUSE_TO_GEAR: 7,        // 穿装: ObjectID+SlotID (明文)
+  CG_ADD_MOUSE_TO_INVENTORY: 8,   // 光标→背包: ObjectID+InvenX+InvenY (明文)
+  CG_ADD_MOUSE_TO_ZONE: 10,       // 丢到地面: ObjectID (加密, ObjID^code)
+  CG_ADD_ZONE_TO_INVENTORY: 12,   // 拾取→背包: ObjID+ZoneX+ZoneY+InvenX+InvenY (SHUFFLE_5)
+  CG_ADD_ZONE_TO_MOUSE: 13,       // 拾取→光标: ObjID+ZoneX+ZoneY (SHUFFLE_3)
 };
 export const NAME = Object.fromEntries(Object.entries(PACKET).map(([k, v]) => [v, k]));
 
@@ -274,12 +290,19 @@ function readNPC(r) {
 // 跳过一个 PCItemInfo(GC_UPDATE_INFO 背包/装备项): ObjectID u32, IClass u8, ItemType u16,
 // optSize u8 + opt*u8, Durability u32, Silver u16, Grade i32, Ench i8, ItemNum u8, MainColor u16,
 // subCount u8 + sub*(ObjID u32+IClass u8+ItemType u16+ItemNum u8+SlotID u8 =9)。
-function skipPCItem(r) {
-  r.u32(); r.u8(); r.u16();
-  const opt = r.u8(); for (let i = 0; i < opt; i++) r.u8();
-  r.u32(); r.u16(); r.i32(); r.u8(); r.u8(); r.u16();
-  const sub = r.u8(); for (let i = 0; i < sub; i++) { r.u32(); r.u8(); r.u16(); r.u8(); r.u8(); }
+// PCItemInfo::read 精确字段序(背包/装备/extra/摩托 共用本体; 尾部坐标各异由调用方读)。
+// 核对 research/server/src/Core/PCItemInfo.cpp: ObjectID u32, IClass u8, ItemType u16,
+//   optSize u8+opt*u8, Durability u32, Silver u16, Grade i32, Ench i8, ItemNum u8, MainColor u16,
+//   subCount u8 + sub*{ObjID u32,IClass u8,ItemType u16,ItemNum u8,SlotID u8}(9字节)。
+function readPCItem(r) {
+  const it = { objectID: r.u32(), itemClass: r.u8(), itemType: r.u16() };
+  const opt = r.u8(); it.options = []; for (let i = 0; i < opt; i++) it.options.push(r.u8());
+  it.durability = r.u32(); it.silver = r.u16(); it.grade = r.i32();
+  it.enchant = (r.u8() << 24 >> 24); it.num = r.u8(); it.mainColor = r.u16();   // enchant 有符号 i8
+  const sub = r.u8(); it.sub = []; for (let i = 0; i < sub; i++) it.sub.push({ objectID: r.u32(), itemClass: r.u8(), itemType: r.u16(), num: r.u8(), slotID: r.u8() });
+  return it;
 }
+function skipPCItem(r) { readPCItem(r); }   // 不需结构的位置(extra/摩托)仍丢弃
 // 完整推进 PCSlayerInfo2(GC_UPDATE_INFO 用的玩家完整信息, 非 GC_ADD 的 Info3)。
 // 已对真实包逐字段核对: objID,name, sex,hairStyle, hairColor/skinColor(u16), masterEffectColor(u8),
 // alignment(i32), STR/DEX/INT 各[3]u16, rank(u8),rankExp(u32), STR/DEX/INTExp(u32×3),
@@ -355,8 +378,8 @@ function readUpdateInfoZone(r) {
   else if (pcType === 86) info = readVampireInfo2(r);    // 'V'
   else if (pcType === 79) info = readOustersInfo2(r);    // 'O'
   else return null;
-  const inv = r.u8(); for (let i = 0; i < inv; i++) { skipPCItem(r); r.u8(); r.u8(); }   // +InvenX,InvenY
-  const gear = r.u8(); for (let i = 0; i < gear; i++) { skipPCItem(r); r.u8(); }          // +SlotID
+  const inventory = []; const inv = r.u8(); for (let i = 0; i < inv; i++) { const it = readPCItem(r); it.invenX = r.u8(); it.invenY = r.u8(); inventory.push(it); }
+  const gear = []; const gn = r.u8(); for (let i = 0; i < gn; i++) { const it = readPCItem(r); it.slotID = r.u8(); gear.push(it); }
   const extra = r.u8(); for (let i = 0; i < extra; i++) skipPCItem(r);
   const eff = r.u8(); for (let i = 0; i < eff; i++) { r.u16(); r.u16(); } // EffectInfo 每项 2 个 WORD(对真实包核对)
   // m_hasMotorcycle(BYTE); 非 0 时跟 RideMotorcycleInfo —— 必须按开源线格式正确跳过, 不能放弃整包,
@@ -369,7 +392,7 @@ function readUpdateInfoZone(r) {
     const ln = r.u8(); for (let i = 0; i < ln; i++) { skipPCItem(r); r.u8(); r.u8(); }   // RideMotorcycleSlotInfo = PCItemInfo + InvenX + InvenY
   }
   // 开源 GCUpdateInfo::read 顺序: ZoneID(u16) → ZoneX(u8) → ZoneY(u8)。zoneX/zoneY = 换区临时落点(MoveZone 用)。
-  return { zoneID: r.u16(), zoneX: r.u8(), zoneY: r.u8(), ...info }; // ZoneID + 临时坐标 + HP/MP
+  return { zoneID: r.u16(), zoneX: r.u8(), zoneY: r.u8(), inventory, gear, ...info }; // ZoneID + 临时坐标 + 背包/装备 + HP/MP/等级…
 }
 
 // ───── LC_PC_LIST 各槽位的 base PCInfo 线格式(开源 PCSlayerInfo/PCVampireInfo/PCOustersInfo::read) ─────
@@ -470,6 +493,18 @@ export function decode(u8) {
     }
     // 属性变化(HP/MP/经验/等级/属性…): short+long 全收集(经验在 long), 上层按 type 分发。
     else if (id === PACKET.GC_MODIFY_INFORMATION) { out.mods = readMods(r); }
+    // ── 物品/背包/装备 ──
+    // GCCreateItem(224): 物品入背包格。字段≠PCItemInfo(无 MainColor/sub), 尾随 InvenX,InvenY。
+    else if (id === PACKET.GC_CREATE_ITEM) {
+      const it = { objectID: r.u32(), itemClass: r.u8(), itemType: r.u16() };
+      const opt = r.u8(); it.options = []; for (let i = 0; i < opt; i++) it.options.push(r.u8());
+      it.durability = r.u32(); it.silver = r.u16(); it.grade = r.i32(); it.enchant = (r.u8() << 24 >> 24); it.num = r.u8();
+      it.invenX = r.u8(); it.invenY = r.u8(); out.item = it;
+    }
+    else if (id === PACKET.GC_DELETE_INVENTORY_ITEM) { out.objectID = r.u32(); }                          // 删背包格物品
+    else if (id === PACKET.GC_ADD_GEAR_TO_INVENTORY) { out.slotID = r.u8(); out.invenX = r.u8(); out.invenY = r.u8(); } // 卸装: 槽SlotID→背包(X,Y)
+    else if (id === PACKET.GC_DELETE_AND_PICKUP_OK) { out.objectID = r.u32(); }                            // 拾取确认: 移除地面物件
+    else if (id === PACKET.GC_CANNOT_ADD) { out.objectID = r.u32(); }                                      // 操作失败: 回滚
   } catch (e) { out._err = e.message; }
   return out;
 }
