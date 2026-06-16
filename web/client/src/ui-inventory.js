@@ -10,6 +10,7 @@
 //   失败则占位(色块 + 类型号 + 数量), 逻辑完整可见, 待 dpk 解包后换真图标。
 
 import { loadUIPack, loadItemPack } from "./uispk.js";
+import { loadItemInf, getItemInfo } from "./iteminfo.js";
 
 const SCALE = 2;
 const GRID_COLS = 10, GRID_ROWS = 6, CELL = 30;
@@ -69,6 +70,7 @@ export class InventoryUI {
     [this.invPack, this.gearWin, this.slotPack, this.itemPack] = await Promise.all([
       loadUIPack(inv.win), loadUIPack(gear.win), loadUIPack(gear.slot), loadItemPack(),
     ]);
+    await loadItemInf();                        // 官方 Item.inf: 图标FrameID/多格尺寸/名称
     if (!this.invCv) this._mkCanvas();
     this._loaded = true;
     this._applyVisibility();                  // load 可能晚于首次 toggle, 完成后补应用可见性
@@ -98,10 +100,16 @@ export class InventoryUI {
     if (this.visible) this._render();
   }
 
-  // 尽力而为: itemType 当 frameID(精确表 Item.inf 锁 dpk)。命中真图标则用, 否则占位。
-  _frame(item) { return item.itemType; }
-  _drawItem(ctx, item, cx, cy, cw, ch) {
-    const fid = this._frame(item);
+  // 图标 frameID 来自官方 Item.inf: 背包用 InventoryFrameID, 装备槽用 GearFrameID; 缺表项才回退 itemType。
+  _info(item) { return getItemInfo(item.itemClass, item.itemType); }
+  _frame(item, kind = "inv") {
+    const info = this._info(item);
+    if (info) { const f = kind === "gear" ? info.gearFrameID : info.invFrameID; if (f !== undefined && f !== 65535) return f; }
+    return item.itemType;
+  }
+  _grid(item) { const info = this._info(item); return { w: (info && info.gridW) || 1, h: (info && info.gridH) || 1 }; }
+  _drawItem(ctx, item, cx, cy, cw, ch, kind = "inv") {
+    const fid = this._frame(item, kind);
     const s = this.itemPack && this.itemPack.get(fid);
     if (s && s.width) {
       this.itemPack.blit(ctx, (cx + (cw - s.width) / 2) | 0, (cy + (ch - s.height) / 2) | 0, fid);
@@ -125,8 +133,9 @@ export class InventoryUI {
     this.invPack.blit(ictx, 0, 0, 0);
     const inv = INV[this.race] || INV.slayer;
     for (const it of this.inv) {
+      const g = this._grid(it);                 // 多格物品占 gridW×gridH(官方 Item.inf)
       const gx = inv.x0 + (it.invenX || 0) * CELL, gy = inv.y0 + (it.invenY || 0) * CELL;
-      this._drawItem(ictx, it, gx, gy, CELL, CELL);
+      this._drawItem(ictx, it, gx, gy, g.w * CELL, g.h * CELL, "inv");
     }
     // 装备窗
     const gctx = this.gearCv.getContext("2d"); gctx.imageSmoothingEnabled = false;
@@ -136,7 +145,7 @@ export class InventoryUI {
     const bySlot = {}; for (const it of this.gear) bySlot[it.slotID] = it;
     for (const sl of gear.slots) {
       const it = bySlot[sl.id];
-      if (it) { this._drawItem(gctx, it, sl.x, sl.y, sl.w, sl.h); continue; }
+      if (it) { this._drawItem(gctx, it, sl.x, sl.y, sl.w, sl.h, "gear"); continue; }
       if (sl.img >= 0) {                                   // 空槽底图
         const s = this.slotPack.get(sl.img);
         if (s) this.slotPack.blit(gctx, (sl.x + (sl.w - s.width) / 2) | 0, (sl.y + (sl.h - s.height) / 2) | 0, sl.img);
@@ -152,10 +161,46 @@ export class InventoryUI {
     this.cursorEl = document.createElement("div");
     this.cursorEl.style.cssText = "position:fixed;z-index:30;pointer-events:none;display:none;";
     document.body.appendChild(this.cursorEl);
+    this.tipEl = document.createElement("div");
+    this.tipEl.style.cssText = "position:fixed;z-index:31;pointer-events:none;display:none;max-width:220px;padding:6px 9px;background:rgba(20,16,10,.96);border:1px solid #8a6a3a;border-radius:5px;color:#e8d8b0;font:12px/1.5 system-ui;box-shadow:0 2px 10px #000a;";
+    document.body.appendChild(this.tipEl);
     document.addEventListener("mousemove", (e) => { if (this.cursor) { this.cursorEl.style.left = (e.clientX + 6) + "px"; this.cursorEl.style.top = (e.clientY + 6) + "px"; } });
     this.invCv.addEventListener("click", (e) => this._clickInv(e.offsetX / SCALE, e.offsetY / SCALE));
     this.gearCv.addEventListener("click", (e) => this._clickGear(e.offsetX / SCALE, e.offsetY / SCALE));
+    this.invCv.addEventListener("mousemove", (e) => this._hover(e, "inv"));
+    this.gearCv.addEventListener("mousemove", (e) => this._hover(e, "gear"));
+    this.invCv.addEventListener("mouseleave", () => this._hideTip());
+    this.gearCv.addEventListener("mouseleave", () => this._hideTip());
   }
+  // 悬停物品 → 显示名称/需求/价格(官方 Item.inf)。eName 为英文物品名(忠实开源数据)。
+  _hover(e, kind) {
+    const px = e.offsetX / SCALE, py = e.offsetY / SCALE;
+    let item = null;
+    if (kind === "inv") {
+      const inv = INV[this.race] || INV.slayer;
+      const col = Math.floor((px - inv.x0) / CELL), row = Math.floor((py - inv.y0) / CELL);
+      item = this.inv.find((t) => { const g = this._grid(t); return col >= t.invenX && col < t.invenX + g.w && row >= t.invenY && row < t.invenY + g.h; });
+    } else {
+      const gear = GEAR[this.race] || GEAR.slayer;
+      const sl = gear.slots.find((s) => px >= s.x && px < s.x + s.w && py >= s.y && py < s.y + s.h);
+      if (sl) item = this.gear.find((t) => t.slotID === sl.id);
+    }
+    if (item) this._showTip(item, e.clientX, e.clientY); else this._hideTip();
+  }
+  _showTip(item, x, y) {
+    const info = this._info(item);
+    const name = (info && info.eName) || `类型 ${item.itemClass}-${item.itemType}`;
+    let html = `<div style="color:#ffd87a;font-weight:600">${name}${item.enchant ? " +" + item.enchant : ""}</div>`;
+    if (info) {
+      const req = [];
+      if (info.reqLevel) req.push("Lv" + info.reqLevel);
+      if (info.reqSTR) req.push("STR" + info.reqSTR); if (info.reqDEX) req.push("DEX" + info.reqDEX); if (info.reqINT) req.push("INT" + info.reqINT);
+      if (req.length) html += `<div style="color:#c98;font-size:11px">需求 ${req.join(" ")}</div>`;
+      if (info.price) html += `<div style="color:#9a8;font-size:11px">价 ${info.price}</div>`;
+    }
+    this.tipEl.innerHTML = html; this.tipEl.style.left = (x + 14) + "px"; this.tipEl.style.top = (y + 14) + "px"; this.tipEl.style.display = "block";
+  }
+  _hideTip() { if (this.tipEl) this.tipEl.style.display = "none"; }
   _clickInv(px, py) {
     const inv = INV[this.race] || INV.slayer;
     const col = Math.floor((px - inv.x0) / CELL), row = Math.floor((py - inv.y0) / CELL);
@@ -173,7 +218,7 @@ export class InventoryUI {
   // 光标视觉(index 控制持物状态): 画物品图标跟随鼠标。
   setCursor(item) {
     this.cursor = item;
-    const fid = this._frame(item), s = this.itemPack && this.itemPack.get(fid);
+    const fid = this._frame(item, "inv"), s = this.itemPack && this.itemPack.get(fid);
     const cv = document.createElement("canvas");
     if (s && s.width) { cv.width = s.width; cv.height = s.height; this.itemPack.blit(cv.getContext("2d"), 0, 0, fid); }
     else { cv.width = CELL; cv.height = CELL; const x = cv.getContext("2d"); x.fillStyle = "rgba(110,82,40,.9)"; x.fillRect(0, 0, CELL, CELL); }

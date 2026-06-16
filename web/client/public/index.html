@@ -87,6 +87,7 @@ import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC
   encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
   encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
+import { loadItemInf, getItemInfo } from "../src/iteminfo.js";
 
 const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
 const log = (m, c = "") => { const d = document.createElement("div"); d.className = "l " + c; d.textContent = m; logEl.prepend(d); };
@@ -244,7 +245,7 @@ async function placePlayerAt(x, y) {
         // 点地面物品 → 拾取: 找首个空背包格, 发 CGAddZoneToInventory(SHUFFLE_5)。服务端回 GCCreateItem(入包)+GCDeleteAndPickupOK(移除地面)。
         renderer.setNetPickup((objectID) => {
           const g = groundItems[objectID]; if (!g) return;
-          const slot = firstFreeInvSlot(); if (!slot) { log("背包已满, 无法拾取", "err"); return; }
+          const slot = firstFreeInvSlot(g); if (!slot) { log("背包已满, 无法拾取", "err"); return; }
           if (gws && gws.readyState === 1) gws.send(encCGAddZoneToInventory({ objectID, zoneX: g.x, zoneY: g.y, invenX: slot.x, invenY: slot.y }));
         });
         // 点 NPC → 发 CGNPCTalk; 服务端回 GCNPCSayDynamic(中文对话)/GCNPCResponse(开界面/关对话)。
@@ -475,7 +476,7 @@ function ensureShopUI() {
   shopUI = new ShopUI($("game"));
   if (invUI && invUI.itemPack) shopUI.setItemPack(invUI.itemPack);          // 复用背包 item.ispk
   shopUI.setBuyHandler((it) => {
-    const slot = firstFreeInvSlot(); if (!slot) { log("背包已满, 无法购买", "err"); return; }
+    const slot = firstFreeInvSlot(it); if (!slot) { log("背包已满, 无法购买", "err"); return; }
     if (gws && gws.readyState === 1) gws.send(encCGShopRequestBuy({ objectID: shopUI.npcID, rackType: shopUI.rackType, rackIndex: it.index, num: 1, x: slot.x, y: slot.y }));
   });
   shopUI.setSellHandler((on) => { shopSellMode = on; });
@@ -495,9 +496,21 @@ function showNPCMenu(objectID, name) {
 }
 // 地面掉落物: objectID -> {x,y,itemType}(拾取时需 zoneX/zoneY)。换区清空(随 renderer.clearGroundItems)。
 let groundItems = {};
-function firstFreeInvSlot() {                                 // 首个空背包格(10x6, 物品多格尺寸锁dpk暂按1格)
-  const occ = new Set(invItems.map((it) => it.invenY * 10 + it.invenX));
-  for (let y = 0; y < 6; y++) for (let x = 0; x < 10; x++) if (!occ.has(y * 10 + x)) return { x, y };
+// 首个能容纳该物品的背包空位(10x6)。按官方 Item.inf 的 gridW×gridH 标记占用 + 找连续空位(对齐开源 MGridItemManager)。
+function firstFreeInvSlot(item) {
+  const occ = Array.from({ length: 6 }, () => new Array(10).fill(false));
+  for (const it of invItems) {                                // 已有物品按各自 grid 占多格
+    const info = getItemInfo(it.itemClass, it.itemType);
+    const gw = (info && info.gridW) || 1, gh = (info && info.gridH) || 1;
+    for (let dy = 0; dy < gh; dy++) for (let dx = 0; dx < gw; dx++) { const yy = (it.invenY || 0) + dy, xx = (it.invenX || 0) + dx; if (yy < 6 && xx < 10) occ[yy][xx] = true; }
+  }
+  const ni = item && getItemInfo(item.itemClass, item.itemType);
+  const nw = (ni && ni.gridW) || 1, nh = (ni && ni.gridH) || 1;
+  for (let y = 0; y <= 6 - nh; y++) for (let x = 0; x <= 10 - nw; x++) {
+    let free = true;
+    for (let dy = 0; dy < nh && free; dy++) for (let dx = 0; dx < nw && free; dx++) if (occ[y + dy][x + dx]) free = false;
+    if (free) return { x, y };
+  }
   return null;
 }
 
@@ -808,6 +821,7 @@ function onPacket(p) {
     loginWS.close();                                            // 关登录连接, 转 gameserver
     connectGame(p.gameServerIP, p.gameServerPort, p.key);
     window.__entered = true;
+    loadItemInf().catch(() => {});                              // 预载官方 Item.inf(背包/商店/购买放置共用)
   } else { log(`◀ ${p.name}(${p.size}B)`, ""); }
 }
 </script>

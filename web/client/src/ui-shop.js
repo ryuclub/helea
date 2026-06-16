@@ -5,6 +5,8 @@
 // 商品数据/价格 100% 忠实(服务端权威 ShopTemplate→GCShopList)。物品名表(Item.inf 锁 dpk)缺,
 // 暂显示 类型号; 图标 itemType 当帧号尽力而为(命中真图标率较高), 缺则占位。
 
+import { getItemInfo } from "./iteminfo.js";
+
 const SCALE = 2, CELL = 30;
 
 export class ShopUI {
@@ -21,12 +23,14 @@ export class ShopUI {
   close() { this.visible = false; if (this.el) this.el.style.display = "none"; if (this.onSellToggle) this.onSellToggle(false); }
   isOpen() { return this.visible; }
 
-  _iconCanvas(itemType) {
+  _iconCanvas(item) {
+    const info = getItemInfo(item.itemClass, item.itemType);
+    const fid = info && info.invFrameID !== 65535 ? info.invFrameID : item.itemType;   // 官方 Item.inf 背包图标
     const cv = document.createElement("canvas"); cv.width = CELL; cv.height = CELL;
     const ctx = cv.getContext("2d"); ctx.imageSmoothingEnabled = false;
-    const s = this.itemPack && this.itemPack.get(itemType);
-    if (s && s.width) { try { this.itemPack.blit(ctx, (CELL - s.width) / 2 | 0, (CELL - s.height) / 2 | 0, itemType); } catch {} }
-    else { ctx.fillStyle = "rgba(110,82,40,.85)"; ctx.fillRect(2, 2, CELL - 4, CELL - 4); ctx.fillStyle = "#ffe8c0"; ctx.font = "8px monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(itemType, CELL / 2, CELL / 2); }
+    const s = this.itemPack && this.itemPack.get(fid);
+    if (s && s.width) { try { this.itemPack.blit(ctx, (CELL - s.width) / 2 | 0, (CELL - s.height) / 2 | 0, fid); } catch {} }
+    else { ctx.fillStyle = "rgba(110,82,40,.85)"; ctx.fillRect(2, 2, CELL - 4, CELL - 4); ctx.fillStyle = "#ffe8c0"; ctx.font = "8px monospace"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(item.itemType, CELL / 2, CELL / 2); }
     cv.style.cssText = `width:${CELL * SCALE}px;height:${CELL * SCALE}px;image-rendering:pixelated;vertical-align:middle`;
     return cv;
   }
@@ -41,9 +45,11 @@ export class ShopUI {
     const rows = this.items.map((it) => {
       const row = document.createElement("div");
       row.style.cssText = "display:flex;align-items:center;gap:8px;padding:4px 2px;border-bottom:1px solid #4a3a22";
-      row.appendChild(this._iconCanvas(it.itemType));
+      row.appendChild(this._iconCanvas(it));
+      const meta = getItemInfo(it.itemClass, it.itemType);
+      const nm = meta && meta.eName ? meta.eName : `类型 ${it.itemClass}-${it.itemType}`;
       const info = document.createElement("div"); info.style.cssText = "flex:1;font-size:12px";
-      info.innerHTML = `类型 ${it.itemClass}-${it.itemType}${it.enchant ? " +" + it.enchant : ""}<br><span style="color:#ffd87a">价 ${it.silver}</span>`;
+      info.innerHTML = `${nm}${it.enchant ? " +" + it.enchant : ""}<br><span style="color:#ffd87a">价 ${it.silver}</span>`;
       row.appendChild(info);
       const buy = document.createElement("span"); buy.textContent = "购买";
       buy.style.cssText = "cursor:pointer;color:#ffd87a;border:1px solid #8a6a3a;border-radius:4px;padding:2px 10px;font-size:12px";
