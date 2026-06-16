@@ -77,9 +77,15 @@ export const PACKET = {
   GC_NPC_RESPONSE: 296,           // NPC响应: Code u16(+Param u32, 按包长判断); Code=10 QUIT关对话, 其余多为开界面
   GC_NPC_ASK: 292,                // NPC脚本菜单: ObjID u32+ScriptID u32+NPCID u16(脚本文本锁dpk)
   GC_NPC_SAY: 297,                // NPC静态文本(ScriptID, 文本锁dpk)
-  // ── 商店 ──
-  CG_SHOP_REQUEST_LIST: 101,      // 请求商品列表(NPC ObjectID)
-  GC_SHOP_LIST: 345,              // 商品列表(ObjID+Version+RackType+件数+每件...)
+  // ── 商店(全部明文) ──
+  CG_SHOP_REQUEST_LIST: 101,      // 请求商品列表: ObjID u32+RackType u8
+  CG_SHOP_REQUEST_BUY: 100,       // 购买: ObjID+RackType+RackIndex+Num+X+Y (全 u8 + ObjID u32)
+  CG_SHOP_REQUEST_SELL: 102,      // 出售: ObjID u32+ItemObjID u32+OpCode u8
+  GC_SHOP_LIST: 345,              // 商品列表: ObjID+Version+RackType+件数+每件{idx,item,价格}+市价+ShopType
+  GC_SHOP_BUY_OK: 344,            // 购买成功(物品入背包走 GCCreateItem, 金钱走 GC_MODIFY_INFORMATION)
+  GC_SHOP_BUY_FAIL: 343,          // 购买失败
+  GC_SHOP_SELL_OK: 349,           // 出售成功
+  GC_SHOP_SELL_FAIL: 348,         // 出售失败
 };
 export const NAME = Object.fromEntries(Object.entries(PACKET).map(([k, v]) => [v, k]));
 
@@ -308,9 +314,17 @@ export function encCGAddMouseToZone({ objectID }) {
 export function encCGNPCTalk(objectID) {
   return gframe(PACKET.CG_NPC_TALK, new Writer().u32(objectID >>> 0).build());
 }
-// 请求商店列表 CGShopRequestList(101): NPC ObjectID。(加密待 M3b 核对, 暂明文)
-export function encCGShopRequestList(objectID) {
-  return gframe(PACKET.CG_SHOP_REQUEST_LIST, new Writer().u32(objectID >>> 0).build());
+// 商店(全部明文)。请求商品列表 CGShopRequestList(101): ObjID u32+RackType u8。
+export function encCGShopRequestList({ objectID, rackType = 0 }) {
+  return gframe(PACKET.CG_SHOP_REQUEST_LIST, new Writer().u32(objectID >>> 0).u8(rackType).build());
+}
+// 购买 CGShopRequestBuy(100): ObjID u32+RackType u8+RackIndex u8+Num u8+X u8+Y u8(放入背包格)。
+export function encCGShopRequestBuy({ objectID, rackType = 0, rackIndex, num = 1, x, y }) {
+  return gframe(PACKET.CG_SHOP_REQUEST_BUY, new Writer().u32(objectID >>> 0).u8(rackType).u8(rackIndex).u8(num).u8(x).u8(y).build());
+}
+// 出售 CGShopRequestSell(102): ObjID u32+ItemObjID u32+OpCode u8(0=正常出售)。
+export function encCGShopRequestSell({ objectID, itemObjectID, opCode = 0 }) {
+  return gframe(PACKET.CG_SHOP_REQUEST_SELL, new Writer().u32(objectID >>> 0).u32(itemObjectID >>> 0).u8(opCode).build());
 }
 
 // 聊天(明文 UTF-8; 服务器只转发字节, 网页端之间中文可通)。消息字节 ≤128(服务器限制)。
@@ -636,6 +650,22 @@ export function decode(u8) {
     // NPC 脚本菜单/静态文本: 文本按 ScriptID 查客户端 NPCScript.inf(锁 dpk) → 仅解析结构, 文本暂缺。
     else if (id === PACKET.GC_NPC_ASK) { out.objectID = r.u32(); out.scriptID = r.u32(); out.npcID = r.u16(); }
     else if (id === PACKET.GC_NPC_SAY) { out.objectID = r.u32(); out.scriptID = r.u32(); out.subjectID = r.u8(); }
+    // ── 商店 ──
+    // 商品列表: ObjID u32+Version i32+RackType u8+件数 u8 + 每件{idx u8, item, 价格 silver} + 市价 i16×2 + ShopType u8。
+    else if (id === PACKET.GC_SHOP_LIST) {
+      out.objectID = r.u32(); out.version = r.i32(); out.rackType = r.u8();
+      const n = r.u8(); out.items = [];
+      for (let i = 0; i < n; i++) {
+        const it = { index: r.u8(), objectID: r.u32(), itemClass: r.u8(), itemType: r.u16() };
+        const opt = r.u8(); it.options = []; for (let j = 0; j < opt; j++) it.options.push(r.u8());
+        it.durability = r.u32(); it.silver = r.u16(); it.grade = r.i32(); it.enchant = (r.u8() << 24 >> 24);
+        out.items.push(it);
+      }
+      out.marketCondBuy = (r.u16() << 16 >> 16); out.marketCondSell = (r.u16() << 16 >> 16); out.shopType = r.u8(); // MarketCond i16
+    }
+    else if (id === PACKET.GC_SHOP_BUY_OK || id === PACKET.GC_SHOP_SELL_OK) { out.ok = true; }                  // 成功(物品/金钱走 GCCreateItem/GC_MODIFY)
+    else if (id === PACKET.GC_SHOP_BUY_FAIL) { out.objectID = r.u32(); out.code = r.u8(); out.amount = r.u32(); out.ok = false; } // code: 0金钱不足/1空间不足/4物品不存在
+    else if (id === PACKET.GC_SHOP_SELL_FAIL) { out.ok = false; }
   } catch (e) { out._err = e.message; }
   return out;
 }

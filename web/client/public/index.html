@@ -75,8 +75,10 @@ import { CharSelectScreen } from "../src/ui-charselect.js";
 import { CharCreateScreen } from "../src/ui-charcreate.js";
 import { HudHpBar } from "../src/ui-hud.js";
 import { InventoryUI } from "../src/ui-inventory.js";
+import { ShopUI } from "../src/ui-shop.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
+  encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 
 const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
@@ -402,7 +404,9 @@ let invCursorItem = null, invCursorFrom = null;
 function onInvAction(action, p) {
   const send = (b) => { if (gws && gws.readyState === 1) gws.send(b); };
   if (action === "pickInv") {
-    const it = p.item; invCursorItem = it; invCursorFrom = { type: "inv", x: it.invenX, y: it.invenY };
+    const it = p.item;
+    if (shopSellMode && shopUI) { send(encCGShopRequestSell({ objectID: shopUI.npcID, itemObjectID: it.objectID })); return; }   // 商店开启: 点背包物=出售
+    invCursorItem = it; invCursorFrom = { type: "inv", x: it.invenX, y: it.invenY };
     invItems = invItems.filter((t) => t !== it); send(encCGAddInventoryToMouse({ objectID: it.objectID, invenX: it.invenX, invenY: it.invenY }));
     refreshInv(); invUI.setCursor(it);
   } else if (action === "pickGear") {
@@ -452,6 +456,33 @@ function showNPCDialog(name, message) {
   $("npcClose").onclick = hideNPCDialog;
 }
 function hideNPCDialog() { if (npcDialog) npcDialog.style.display = "none"; }
+
+// 商店(M3b): 点商店NPC→GCNPCAsk(脚本菜单, 文本锁dpk)→降级弹"购买/离开"按钮→CGShopRequestList→GCShopList→商店窗。
+// 购买: 点商品发 CGShopRequestBuy(找空背包格); 出售: 商店开启时点背包物发 CGShopRequestSell。
+let shopUI = null, shopSellMode = false;
+function ensureShopUI() {
+  if (shopUI) return shopUI;
+  shopUI = new ShopUI($("game"));
+  if (invUI && invUI.itemPack) shopUI.setItemPack(invUI.itemPack);          // 复用背包 item.ispk
+  shopUI.setBuyHandler((it) => {
+    const slot = firstFreeInvSlot(); if (!slot) { log("背包已满, 无法购买", "err"); return; }
+    if (gws && gws.readyState === 1) gws.send(encCGShopRequestBuy({ objectID: shopUI.npcID, rackType: shopUI.rackType, rackIndex: it.index, num: 1, x: slot.x, y: slot.y }));
+  });
+  shopUI.setSellHandler((on) => { shopSellMode = on; });
+  return shopUI;
+}
+// NPC 菜单(降级: 脚本菜单文本锁dpk → 手搓"购买/离开"按钮)。
+function showNPCMenu(objectID, name) {
+  const d = ensureNPCDialog();
+  d.innerHTML = `<div style="font-size:15px;color:#ffd87a;border-bottom:1px solid #8a6a3a;margin-bottom:8px;padding-bottom:5px">${(name || "NPC").replace(/</g, "&lt;")}</div>`
+    + `<div style="margin-bottom:8px;color:#9a8;font-size:12px">(脚本对话文本锁 dpk, 暂提供商店入口)</div>`
+    + `<div style="display:flex;gap:10px;justify-content:flex-end">`
+    + `<span id="npcBuy" style="cursor:pointer;color:#ffd87a;border:1px solid #8a6a3a;border-radius:4px;padding:2px 14px">购买</span>`
+    + `<span id="npcClose2" style="cursor:pointer;color:#e8d8b0;border:1px solid #6a5a3a;border-radius:4px;padding:2px 14px">离开</span></div>`;
+  d.style.display = "block";
+  $("npcBuy").onclick = () => { if (gws && gws.readyState === 1) gws.send(encCGShopRequestList({ objectID, rackType: 1 })); hideNPCDialog(); };   // RackType=SHOP_RACK_SPECIAL(1): 服务端仅此货架发 GCShopList(NORMAL=0 不发)
+  $("npcClose2").onclick = hideNPCDialog;
+}
 // 地面掉落物: objectID -> {x,y,itemType}(拾取时需 zoneX/zoneY)。换区清空(随 renderer.clearGroundItems)。
 let groundItems = {};
 function firstFreeInvSlot() {                                 // 首个空背包格(10x6, 物品多格尺寸锁dpk暂按1格)
@@ -516,7 +547,14 @@ function onGamePacket(p) {
     if (p.code === 10) hideNPCDialog();                                                                    // QUIT_DIALOGUE: 关对话
     else log(`◀ NPC响应 code=${p.code}${p.parameter !== undefined ? " param=" + p.parameter : ""}(开界面待实现)`, "info");
   }
-  else if (p.name === "GC_NPC_ASK" || p.name === "GC_NPC_SAY") { log(`◀ ${p.name} scriptID=${p.scriptID}(脚本文本锁dpk, 暂不显示)`, "info"); }
+  else if (p.name === "GC_NPC_ASK") { const e = renderer._others.get(p.objectID); showNPCMenu(p.objectID, e ? e.name : "NPC"); }   // 脚本菜单(文本锁dpk)→降级购买入口
+  else if (p.name === "GC_NPC_SAY") { log(`◀ GC_NPC_SAY scriptID=${p.scriptID}(脚本文本锁dpk)`, "info"); }
+  // ── 商店 ──
+  else if (p.name === "GC_SHOP_LIST") { const s = ensureShopUI(); if (invUI && invUI.itemPack) s.setItemPack(invUI.itemPack); s.open(p.objectID, p); log(`◀ 商店 ${p.items.length} 件商品`, "ok"); }
+  else if (p.name === "GC_SHOP_BUY_OK") { log("◀ 购买成功", "ok"); }                                       // 物品入背包走 GCCreateItem, 金钱走 GC_MODIFY
+  else if (p.name === "GC_SHOP_BUY_FAIL") { const r = { 0: "金钱不足", 1: "背包空间不足", 2: "NPC不存在", 3: "非NPC", 4: "商品不存在" }[p.code] || ("code" + p.code); log("◀ 购买失败: " + r, "err"); }
+  else if (p.name === "GC_SHOP_SELL_OK") { log("◀ 出售成功", "ok"); }
+  else if (p.name === "GC_SHOP_SELL_FAIL") { log("◀ 出售失败", "err"); }
   // ── 战斗(复刻开源近战流程) ──
   else if (p.name === "GC_ATTACK_MELEE_OK_1") {   // 我命中确认: 自身ModifyInfo(经验/属性/HP) → 状态
     applyMods(p.mods);
