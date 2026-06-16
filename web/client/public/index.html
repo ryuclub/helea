@@ -29,14 +29,22 @@
   #log { font: 12px/1.6 ui-monospace, monospace; }
   .l { padding: 2px 0; border-bottom: 1px solid #18181e; }
   .ok { color: #6e6; } .err { color: #e66; } .info { color: #9bf; }
+  /* 游戏内聊天 HUD(全屏后忠实开源: 底部输入框 + 左下消息) */
+  #chat { position: absolute; left: 14px; bottom: 14px; z-index: 20; width: 360px; max-width: 46vw; padding: 8px 11px; background: rgba(0,0,0,.45); border: 1px solid #3a3a44; border-radius: 6px; color: #fff; font-size: 13px; outline: none; opacity: .55; transition: opacity .15s; }
+  #chat:focus { opacity: 1; background: rgba(0,0,0,.78); border-color: #6a5a3a; }
+  #gameMsg { position: absolute; left: 14px; bottom: 56px; z-index: 19; width: 360px; max-width: 46vw; max-height: 32vh; overflow: hidden; display: flex; flex-direction: column-reverse; gap: 3px; pointer-events: none; font: 13px/1.45 system-ui; }
+  #gameMsg .m { padding: 2px 8px; background: rgba(0,0,0,.42); border-radius: 4px; width: fit-content; max-width: 100%; text-shadow: 0 1px 2px #000; }
+  #gameMsg .me { color: #bfe6ff; } #gameMsg .other { color: #ffe39a; } #gameMsg .sys { color: #9bf; }
 </style>
 </head>
 <body>
-<div id="game"><canvas id="cv"></canvas><div id="title">天之炼狱 · Adam 城(真实地形)</div><button id="toggleSide">☰ 面板</button>
+<div id="game"><canvas id="cv"></canvas><div id="title">天之炼狱 · Adam 城(真实地形)</div><button id="toggleSide">☰ 调试</button>
   <div id="zoneFade"><div class="veil"></div><div class="spin"></div><div class="tip">加载中…</div></div>
   <div id="uiScreen"></div>
+  <div id="gameMsg"></div>
+  <input id="chat" placeholder="回车发送聊天" autocomplete="off" maxlength="64" />
 </div>
-<div id="side">
+<div id="side" class="hidden">
   <h1>天之炼狱 (DarkEden) · Web 客户端</h1>
   <div class="sub">Babylon 引擎 · 真实注册 / 建角色 / 登录流</div>
   <!-- 登录已由开源 Login.spk 界面(覆盖层 #uiScreen)忠实接管; 旧侧栏表单保留隐藏作调试回退 -->
@@ -59,7 +67,6 @@
     <button id="docreate" style="width:100%">创建角色并进入</button>
   </div>
   <div id="stat"></div>
-  <input id="chat" class="f" placeholder="聊天: 回车发送(进入游戏后)" autocomplete="off" />
   <div id="log"></div>
 </div>
 
@@ -83,6 +90,9 @@ import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC
 
 const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
 const log = (m, c = "") => { const d = document.createElement("div"); d.className = "l " + c; d.textContent = m; logEl.prepend(d); };
+// 游戏内聊天消息(全屏 HUD): 画面左下, 最多保留 12 条, 旧的自动移除。
+const gameMsgEl = document.getElementById("gameMsg");
+function addGameMsg(text, cls = "sys") { const d = document.createElement("div"); d.className = "m " + cls; d.textContent = text; gameMsgEl.prepend(d); while (gameMsgEl.children.length > 12) gameMsgEl.lastChild.remove(); }
 // 种族 ↔ pcType(PC_SLAYER=0/VAMPIRE=1/OUSTERS=2)。
 const RACE_NAMES = ["slayer", "vampire", "ousters"];
 const raceType = (race) => Math.max(0, RACE_NAMES.indexOf(race));
@@ -129,7 +139,7 @@ chatEl.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
   const msg = chatEl.value.trim(); chatEl.value = "";
   if (!msg) return;
-  if (gws && gws.readyState === 1) { gws.send(encCGSay(msg)); log(`你: ${msg}`, "ok"); }
+  if (gws && gws.readyState === 1) { gws.send(encCGSay(msg)); log(`你: ${msg}`, "ok"); addGameMsg(`你: ${msg}`, "me"); chatEl.blur(); }
   else log("(未进入游戏, 无法发言)", "err");
 });
 
@@ -516,7 +526,7 @@ function onGamePacket(p) {
   else if (p.name === "GC_SET_POSITION") { log(`◀ GC_SET_POSITION (${p.x},${p.y})`, "ok"); placePlayerAt(p.x, p.y); }
   else if (p.name === "GC_MOVE_OK") { renderer.serverStep(p.x, p.y, p.dir); }
   else if (p.name === "GC_MOVE_ERROR") { renderer.serverReject(p.x, p.y); }
-  else if (p.name === "GC_SAY") { log(`玩家#${p.objectID}: ${p.message}`, "info"); } // 附近玩家聊天
+  else if (p.name === "GC_SAY") { log(`玩家#${p.objectID}: ${p.message}`, "info"); addGameMsg(`玩家: ${p.message}`, "other"); if (window.__renderer?.sayBubble) window.__renderer.sayBubble(p.objectID, p.message); } // 附近玩家聊天
   else if (p.name === "GC_MODIFY_INFORMATION") { // HP/MP/经验/等级/属性 增量: 按 type 分发到状态
     applyMods(p.mods);
   }
