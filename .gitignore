@@ -1,12 +1,8 @@
 # ───── 版权素材(绝不入库) ─────
 # 原版客户端(SOFTON 版权)，自备
 DarkEden*/
-**/public/assets/*.spk
-**/public/assets/*.spki
-**/public/assets/*.ispk
-**/public/assets/*.aspk
-**/public/assets/*.sspk
-**/public/assets/*.map
+# 整个运行时资源目录(精灵/地图/UI/怪物 cfpk/ispk 分块等, ~1GB), 一律不入库, 由发行包复制生成
+**/public/assets/
 assets/darkeden-raw/
 !assets/darkeden-raw/README.md
 
