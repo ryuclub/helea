@@ -74,7 +74,7 @@ import { LoginScreen } from "../src/ui-login.js";
 import { CharSelectScreen } from "../src/ui-charselect.js";
 import { CharCreateScreen } from "../src/ui-charcreate.js";
 import { HudHpBar } from "../src/ui-hud.js";
-import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCGConnect, encCGReady, encCGMove, encCGSay,
+import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 
 const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
@@ -225,6 +225,8 @@ async function placePlayerAt(x, y) {
         player = renderer.spawnSprite(frames, t.x, t.y, anim);
         window.__player = player;
         renderer.setNetMove((dir, cx, cy) => { if (gws && gws.readyState === 1) gws.send(encCGMove({ dir, x: cx, y: cy })); });
+        // 普攻: 点怪 → 渲染器回调送 CG_ATTACK(目标ObjectID + 我当前格/朝向, 加密 SHUFFLE_4)。
+        renderer.setNetAttack((targetID) => { if (gws && gws.readyState === 1 && player) gws.send(encCGAttack({ targetID, x: player.col, y: player.row, dir: player.dir })); });
         log(`角色已站入 zone${t.zone} (${t.x},${t.y}) · ${myRace}${mySex ? "(女)" : "(男)"} · 服务器权威移动`, "ok");
       } else {
         renderer.placePlayer(t.x, t.y);                      // 换区/传送落点: 重定位现有角色到新图
@@ -248,9 +250,36 @@ async function addOtherPlayer(c) {
   if (!c || c.name === myCharName) return;                   // 跳过自己
   try {
     const { frames, anim } = await buildRaceAssets(c.race, c.sex || 0);
-    renderer.addOther(c.objectID, frames, c.x, c.y, c.dir, anim);
+    renderer.addOther(c.objectID, frames, c.x, c.y, c.dir, anim, { name: c.name, hp: c.curHP || 0, maxHP: c.maxHP || 0, kind: "player" });
     log(`▶ 其他玩家进入视野: ${c.name} #${c.objectID} (${c.race}, ${c.x},${c.y})`, "ok");
   } catch (e) { log("其他玩家资源加载失败: " + e.message, "err"); }
+}
+
+// 怪物/NPC 精灵: 用 creature.cfpk[spriteType] 取动作帧(动作0=站立, 1=移动尽力), creature.ispk 取精灵。带缓存。
+// ⚠ spriteType→FrameID 精确映射表锁在 dklegend.dpk(未解包) → 暂按 spriteType 直接当 FrameID(尽力而为, 个别怪可能显示成别的怪)。
+let _creatureCFPK = null; const _creatureCache = new Map();
+async function loadCreatureAssets(spriteType) {
+  if (_creatureCache.has(spriteType)) return _creatureCache.get(spriteType);
+  if (!_creatureCFPK) _creatureCFPK = parseCFPK(await fetchBuf("/public/assets/creature.cfpk"));
+  const stand = getActionSeqs(_creatureCFPK, spriteType, 0);
+  if (!stand) { _creatureCache.set(spriteType, null); return null; }
+  const move = getActionSeqs(_creatureCFPK, spriteType, 1) || stand;
+  const attack = getActionSeqs(_creatureCFPK, spriteType, 2) || null;   // 动作2=攻击(尽力, 个别怪可能无)
+  const ids = new Set();
+  for (const seqs of [stand, move, attack]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
+  const frames = await loadSpritesById("/public/assets/creature.ispk", 64, [...ids]);
+  const out = { frames, anim: { stand, move, attack } };
+  _creatureCache.set(spriteType, out);
+  return out;
+}
+// 怪物/NPC 进入视野: 复用 addOther 实体管线(移动 GC_MOVE→otherStep, 消失 GC_DELETE_OBJECT→removeOther 已通用)。
+async function addCreature(c) {
+  if (!c) return;
+  try {
+    const a = await loadCreatureAssets(c.spriteType);
+    if (!a) { log(`生物精灵缺失 type${c.spriteType} (${c.name})`, "err"); return; }
+    renderer.addOther(c.objectID, a.frames, c.x, c.y, c.dir, a.anim, { name: c.name, hp: c.curHP || 0, maxHP: c.maxHP || 0, kind: c.kind });
+  } catch (e) { log("生物资源加载失败: " + e.message, "err"); }
 }
 
 // 连到 gameserver, 走 CGConnect→CG_READY, 入世
@@ -316,8 +345,21 @@ function onGamePacket(p) {
   }
   // ── 其他玩家可见(三族, 各自精灵包) ──
   else if (p.name === "GC_ADD_SLAYER" || p.name === "GC_ADD_VAMPIRE" || p.name === "GC_ADD_OUSTERS") { addOtherPlayer(p.creature); }
+  else if (p.name === "GC_ADD_MONSTER" || p.name === "GC_ADD_NPC") { addCreature(p.creature); }   // 怪物/NPC 进入视野
   else if (p.name === "GC_MOVE") { renderer.otherStep(p.objectID, p.x, p.y, p.dir); }   // 他人移动
   else if (p.name === "GC_DELETE_OBJECT") { renderer.removeOther(p.objectID); }          // 他人离开视野
+  // ── 战斗(复刻开源近战流程) ──
+  else if (p.name === "GC_ATTACK_MELEE_OK_1") {   // 我命中确认: 自身ModifyInfo(经验/属性), HP/MP 变化即更HUD
+    if (p.mods) { for (const m of p.mods) { if (m.type === 12) hpmp.hp = m.value; else if (m.type === 13) hpmp.hpMax = m.value; else if (m.type === 14) hpmp.mp = m.value; else if (m.type === 15) hpmp.mpMax = m.value; } updateHud(); }
+  }
+  else if (p.name === "GC_ATTACK_MELEE_OK_2") {   // 我被怪攻击: ModifyInfo 含我方HP变化 → 更HUD; 攻击者播攻击动画
+    if (p.mods) { for (const m of p.mods) { if (m.type === 12) hpmp.hp = m.value; else if (m.type === 13) hpmp.hpMax = m.value; else if (m.type === 14) hpmp.mp = m.value; else if (m.type === 15) hpmp.mpMax = m.value; } updateHud(); }
+    renderer.otherAttack(p.objectID);
+  }
+  else if (p.name === "GC_ATTACK_MELEE_OK_3") { renderer.otherAttack(p.objectID); }        // 旁观: 攻击者播攻击动画
+  // 被击者新HP→血条+伤害飘字。服务端 broadcast 已排除被击者本人, 故只会是视野内的怪/他人(自身HP走 GC_MODIFY_INFORMATION)。
+  else if (p.name === "GC_STATUS_CURRENT_HP") { renderer.setCreatureHP(p.objectID, p.curHP); }
+  else if (p.name === "GC_ADD_MONSTER_CORPSE") { renderer.removeOther(p.objectID); }       // 怪死→尸体, 移除活体
 }
 
 // ───── 注册 / 登录 / 建角色 流程 ─────

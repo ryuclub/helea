@@ -37,7 +37,18 @@ export const PACKET = {
   GC_ADD_OUSTERS: 190,
   GC_ADD_MONSTER: 183,
   GC_ADD_NPC: 189,
+  GC_ADD_MONSTER_CORPSE: 184, // 怪物死亡→尸体(ObjectID 等), 我们仅据此移除活体
   GC_DELETE_OBJECT: 232, // ObjectID(4): 离开视野/消失
+  // 战斗(普攻 SKILL_ATTACK_MELEE): 复刻开源服务端流程(CGAttackHandler→AttackMelee→setDamage)。
+  // CG_ATTACK 加密(SHUFFLE_4)发出; 服务端回 3 种包: OK1(给攻击者确认+自身ModifyInfo), OK3(给旁观者播攻击动画),
+  // GC_STATUS_CURRENT_HP(广播被击者新HP→血条/伤害飘字)。怪死再发 GC_ADD_MONSTER_CORPSE。
+  CG_ATTACK: 15,                  // 客户端发: 目标ObjectID(u32)+我X(u8)+我Y(u8)+Dir(u8)
+  GC_ATTACK_MELEE_OK_1: 208,      // 给攻击者: TargetObjectID(u32)+ModifyInfo(攻击者自身属性变化)
+  GC_ATTACK_MELEE_OK_2: 209,      // 给被攻击的玩家(被怪打): 攻击者ObjectID(u32)+ModifyInfo(我方HP变化)
+  GC_ATTACK_MELEE_OK_3: 210,      // 给旁观者: 攻击者ObjectID(u32)+TargetObjectID(u32) → 播攻击动画
+  GC_SKILL_FAILED_1: 359,         // 技能失败(给施法者): 命中失败/距离/冷却。仅命名以静默, 不需动作
+  GC_SKILL_FAILED_2: 360,         // 技能失败(广播旁观者)。仅命名以静默
+  GC_STATUS_CURRENT_HP: 382,      // 广播被击者: ObjectID(u32)+CurrentHP(u16) → 更新血条, 据旧HP差值飘伤害
   // 聊天(明文): CG_SAY=u32 color+u8 len+msg; GC_SAY=u32 objectID+u32 color+u8 len+msg
   CG_SAY: 87,
   GC_SAY: 335,
@@ -166,6 +177,26 @@ export function encCGMove({ dir, x, y }) {
   return gframe(PACKET.CG_MOVE, w.build());
 }
 
+// 普攻 CG_ATTACK(15)。code==0: 明文 ObjectID(u32),X,Y,Dir。code!=0: 每值 ^code + SHUFFLE_4 字段序。
+// ⚠ 服务端 Encrypter::convert 对多字节值是「整值 ^ code」(m_uintCode=(uint)code, 只低字节受影响),
+//   不是逐字节异或!u8 字段(X/Y/Dir)恰好等价, 但 u32 ObjectID 必须只异或低字节(targetID ^ code)。
+// SHUFFLE_4(A=ObjID,B=X,C=Y,D=Dir): 0=ABCD 1=BCDA 2=CDAB 3=DACB(复刻 SHUFFLE_STATEMENT_4)。
+export function encCGAttack({ targetID, x, y, dir }) {
+  const w = new Writer();
+  if (_code === 0) { w.u32(targetID >>> 0).u8(x).u8(y).u8(dir); }
+  else {
+    const c = _code;
+    const oid = (targetID ^ c) >>> 0, X = x ^ c, Y = y ^ c, D = dir ^ c;
+    const A = () => w.u32(oid), B = () => w.u8(X), C = () => w.u8(Y), D2 = () => w.u8(D);
+    const m = c % 4;
+    if (m === 0) { A(); B(); C(); D2(); }
+    else if (m === 1) { B(); C(); D2(); A(); }
+    else if (m === 2) { C(); D2(); A(); B(); }
+    else { D2(); A(); C(); B(); }
+  }
+  return gframe(PACKET.CG_ATTACK, w.build());
+}
+
 // 聊天(明文 UTF-8; 服务器只转发字节, 网页端之间中文可通)。消息字节 ≤128(服务器限制)。
 export function encCGSay(message, color = 0) {
   let bytes = new TextEncoder().encode(message);
@@ -210,6 +241,33 @@ function readVampOustInfo(r, race) {
   o.name = new TextDecoder().decode(Uint8Array.from(nb));
   o.x = r.u8(); o.y = r.u8(); o.dir = r.u8();
   o.sex = (r.u8() & 1) ? 0 : 1;   // ★服务端 Sex2String={FEMALE,MALE} → MALE=1; 我们 sex=0 男 → 须反转
+  return o;
+}
+
+// GC_ADD_MONSTER(183, 明文): ObjectID u32, MonsterType u16(=精灵类型), nameLen u8+name, MainColor u16, SubColor u16,
+//   X u8, Y u8, Dir u8, EffectInfo(ListNum u8 + ListNum*2 个 u16), CurHP u16, MaxHP u16, FromFlag u8。
+function readMonster(r) {
+  const o = { kind: "monster" };
+  o.objectID = r.u32();
+  o.spriteType = r.u16();
+  const n = r.u8(); const nb = []; for (let i = 0; i < n; i++) nb.push(r.u8());
+  o.name = new TextDecoder().decode(Uint8Array.from(nb));
+  o.mainColor = r.u16(); o.subColor = r.u16();
+  o.x = r.u8(); o.y = r.u8(); o.dir = r.u8();
+  const ln = r.u8(); for (let i = 0; i < ln * 2; i++) r.u16();   // EffectInfo: ListNum + ListNum*2 个 WORD, 跳过
+  o.curHP = r.u16(); o.maxHP = r.u16(); r.u8();                  // FromFlag 忽略
+  return o;
+}
+// GC_ADD_NPC(189, 明文): ObjectID u32, nameLen u8+name, NPCID u16, SpriteType u16, MainColor u16, SubColor u16,
+//   X u8, Y u8, Dir u8。
+function readNPC(r) {
+  const o = { kind: "npc" };
+  o.objectID = r.u32();
+  const n = r.u8(); const nb = []; for (let i = 0; i < n; i++) nb.push(r.u8());
+  o.name = new TextDecoder().decode(Uint8Array.from(nb));
+  o.npcID = r.u16(); o.spriteType = r.u16();
+  o.mainColor = r.u16(); o.subColor = r.u16();
+  o.x = r.u8(); o.y = r.u8(); o.dir = r.u8();
   return o;
 }
 
@@ -380,6 +438,23 @@ export function decode(u8) {
     else if (id === PACKET.GC_ADD_SLAYER) { out.creature = readSlayerInfo(r); }
     else if (id === PACKET.GC_ADD_VAMPIRE) { out.creature = readVampOustInfo(r, "vampire"); }
     else if (id === PACKET.GC_ADD_OUSTERS) { out.creature = readVampOustInfo(r, "ousters"); }
+    else if (id === PACKET.GC_ADD_MONSTER) { out.creature = readMonster(r); }
+    else if (id === PACKET.GC_ADD_NPC) { out.creature = readNPC(r); }
+    // 近战命中确认(给攻击者): TargetObjectID + ModifyInfo(攻击者自身属性变化, short{type,value u16}+long{type,value u32})
+    else if (id === PACKET.GC_ATTACK_MELEE_OK_1) {
+      out.objectID = r.u32(); out.mods = [];
+      const sc = r.u8(); for (let i = 0; i < sc; i++) { out.mods.push({ type: r.u8(), value: r.u16() }); }
+      const lc = r.u8(); for (let i = 0; i < lc; i++) { r.u8(); r.u32(); }
+    }
+    // 被怪攻击(给被击玩家): 攻击者ObjectID + ModifyInfo(我方HP变化)。结构同 OK1。
+    else if (id === PACKET.GC_ATTACK_MELEE_OK_2) {
+      out.objectID = r.u32(); out.mods = [];
+      const sc = r.u8(); for (let i = 0; i < sc; i++) { out.mods.push({ type: r.u8(), value: r.u16() }); }
+      const lc = r.u8(); for (let i = 0; i < lc; i++) { r.u8(); r.u32(); }
+    }
+    else if (id === PACKET.GC_ATTACK_MELEE_OK_3) { out.objectID = r.u32(); out.targetID = r.u32(); }                 // 旁观者: 攻击者→目标, 播攻击动画
+    else if (id === PACKET.GC_STATUS_CURRENT_HP) { out.objectID = r.u32(); out.curHP = r.u16(); }                    // 被击者新HP→血条+伤害飘字
+    else if (id === PACKET.GC_ADD_MONSTER_CORPSE) { out.objectID = r.u32(); }                                        // 怪死→移除活体
     // 入世/换区信息: 解析所在 ZoneID + 自身 HP/MP(三族)。失败 zoneID=null → 上层回退, 不送错 code。明文。
     else if (id === PACKET.GC_UPDATE_INFO) {
       try { const u = readUpdateInfoZone(r); if (u) { out.zoneID = u.zoneID; out.zoneX = u.zoneX; out.zoneY = u.zoneY; out.curHP = u.curHP; out.maxHP = u.maxHP; out.curMP = u.curMP; out.maxMP = u.maxMP; } else out.zoneID = null; }

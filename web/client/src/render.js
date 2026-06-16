@@ -39,7 +39,8 @@ const WALL_TRANS_RX = 34, WALL_TRANS_RY = 62;
 export class GameRenderer {
   constructor(canvas) {
     this.canvas = canvas; this.entities = [];
-    this._others = new Map();        // objectID -> 其他玩家实体(复用主角精灵管线)
+    this._others = new Map();        // objectID -> 其他玩家/怪物/NPC 实体(复用主角精灵管线)
+    this._floaters = [];             // 飘字(伤害数字): {x,y,z(世界), text, t0, color}
     this._walls = [];                // 可透明墙(bTrans)网格 {mesh,gx,gy,w,h,vpRow}: 角色走到墙后→半透明(开源 IsWallTransPosition)
     this._blocks = new Map();        // "bx,by" -> {bx,by,ground,buildings:[],loading}
     this._blockLoader = null; this._map = null;   // 在途块数从 _blocks 里 loading:true 实时统计(无独立计数器)
@@ -66,6 +67,11 @@ export class GameRenderer {
     // 仅影响 3D mesh(2D 精灵/地砖是 unlit)。groundColor 抬高背光面亮度, 避免 3D 角色偏黑。
     const hemi = new B.HemisphericLight("l", new B.Vector3(0, 1, 0), this.scene);
     hemi.intensity = 1.35; hemi.groundColor = new B.Color3(0.75, 0.75, 0.75);
+    // 2D 覆盖层: 画生物头顶血条/名字/飘血伤害(把世界坐标投影到屏幕)。pointer-events:none 不挡点击。
+    const ov = document.createElement("canvas");
+    ov.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;";
+    (this.canvas.parentElement || document.body).appendChild(ov);
+    this.overlay = ov; this.octx = ov.getContext("2d");
     addEventListener("resize", () => { this.engine.resize(); this._setOrtho(); });
     GameRenderer._registerWallShader();
     return this;
@@ -314,12 +320,28 @@ void main(){
 
   // ───── 其他玩家(视野内) ─────
   // 出现/更新: GC_ADD_SLAYER 等。framesById/anim 与主角同一套(同为三族角色精灵)。
-  addOther(objectID, framesById, col, row, dir, anim) {
+  addOther(objectID, framesById, col, row, dir, anim, info = null) {
     let e = this._others.get(objectID);
-    if (e) { e.col = col; e.row = row; e.dir = dir; e.stepping = false; this._renderAt(e, col, row); return e; }
+    if (e) { e.col = col; e.row = row; e.dir = dir; e.stepping = false; if (info) Object.assign(e, info); this._renderAt(e, col, row); return e; }
     e = this._makeSpriteEntity(framesById, col, row, anim, "oth" + objectID);
-    e.dir = dir; this._others.set(objectID, e); this._renderAt(e, col, row);
+    e.dir = dir; if (info) Object.assign(e, info);   // {name, hp, maxHP, kind}
+    this._others.set(objectID, e); this._renderAt(e, col, row);
     return e;
+  }
+  // 更新某生物的 HP(战斗/受击) → 血条即时反映。
+  setOtherHP(objectID, hp, maxHP) { const e = this._others.get(objectID); if (e) { e.hp = hp; if (maxHP != null) e.maxHP = maxHP; } }
+  // 点击怪物→攻击的回调(index.html 设为发 CG_ATTACK)。
+  setNetAttack(fn) { this._netAttack = fn; return this; }
+  // 某生物播一次攻击动画(GC_ATTACK 广播; 自己的攻击由本地 playAction 处理)。
+  otherAttack(objectID) { const e = this._others.get(objectID); if (e && e.anim.attack) { e._atkUntil = performance.now() + 450; } }
+  // 某生物 HP 更新到绝对值(服务端 GC_STATUS_CURRENT_HP 广播被击者新HP)。
+  // 据旧HP-新HP 算伤害飘字; HP 到 0 等服务端删/尸体包再移除。
+  setCreatureHP(objectID, newHP) {
+    const e = this._others.get(objectID); if (!e) return;
+    const dmg = Math.max(0, (e.hp ?? newHP) - newHP);
+    e.hp = newHP;
+    if (dmg > 0 && e.plane && !e.plane.isDisposed())
+      this._floaters.push({ x: e.plane.position.x, y: e.plane.position.y + (e._h || 60) / 2, z: e.plane.position.z, text: "-" + dmg, t0: performance.now(), color: "#f55" });
   }
   // 他人移动 GC_MOVE(282): 平滑步进到 (nc,nr), 朝向 dir。
   otherStep(objectID, nc, nr, dir) {
@@ -339,7 +361,9 @@ void main(){
     if (!e._lastNow) e._lastNow = now;
     e.animClock += now - e._lastNow; e._lastNow = now;
     while (e.animClock >= frameMs) { e.animClock -= frameMs; e.animIdx++; }
-    if (e.stepping) {
+    if (e._atkUntil && now < e._atkUntil && e.anim.attack) {   // 攻击动画(临时)
+      e.action = "attack"; this._renderAt(e, e.col, e.row);
+    } else if (e.stepping) {
       e.action = "move";
       const p = Math.min(1, (now - e.t0) / e.stepMs);
       const a = this._tileGTL(e.fromCol, e.fromRow), b = this._tileGTL(e.toCol, e.toRow);
@@ -364,6 +388,7 @@ void main(){
   _drawFrame(e, gx, gy) {
     const fr = this._curFrame(e); if (!fr) return;
     const m = e.frameMeta[fr.s]; if (!m) return;
+    e._h = m.h;                                                   // 当前精灵高(覆盖层血条/名字定位用)
     const cx = gx + fr.cx + m.w / 2, cy = gy + fr.cy + m.h / 2;   // 贴图中心(全局像素)
     const w = this._gw(cx, cy);
     const depthY = gy + TH / 2;                                   // 角色深度=所在行中点(开源扇区画家: 生物半行前置, 赢同行物件、被南行物件遮挡)
@@ -496,6 +521,16 @@ void main(){
     this.scene.onPointerObservable.add((pi) => {
       if (pi.type !== BABYLON.PointerEventTypes.POINTERPICK) return;
       const p = pi.pickInfo; if (!p || !p.hit) return;
+      // 点到怪物精灵 → 攻击它(面向+发 CG_ATTACK, 本地播攻击动画); 否则点地面寻路移动。
+      if (this._netAttack && p.pickedMesh) {
+        for (const [oid, e] of this._others) {
+          if (e.plane === p.pickedMesh && e.kind === "monster") {
+            const pe = this.player;
+            if (pe) { pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row)); this.playAction("attack"); }
+            this._netAttack(oid); return;
+          }
+        }
+      }
       const { col, row } = this._worldToTile(p.pickedPoint);
       this.moveTo(col, row);
     });
@@ -571,7 +606,51 @@ void main(){
       this._updateWallTransparency(e.col, e.row);   // 走到墙后→墙半透明(透出角色)
      } catch (err) { if (!this._loopErrLogged) { console.error("[render loop]", err); this._loopErrLogged = true; } } // 单帧异常不冻死全局
     });
+    // 渲染后画 2D 覆盖层(血条/名字): 用最新相机矩阵, 且不受上面 early-return 影响。
+    this.scene.onAfterRenderObservable.add(() => { try { this._drawOverlays(); } catch {} });
     this.engine.runRenderLoop(() => this.scene.render());
     return this;
+  }
+
+  // 生物头顶血条 + 名字(把世界坐标投影到屏幕画到覆盖层 canvas)。
+  _drawOverlays() {
+    const ctx = this.octx, ov = this.overlay; if (!ctx) return;
+    const B = BABYLON, w = this.engine.getRenderWidth(), h = this.engine.getRenderHeight();
+    if (ov.width !== w || ov.height !== h) { ov.width = w; ov.height = h; }
+    ctx.clearRect(0, 0, w, h);
+    const vpw = this.camera.viewport.toGlobal(w, h), tm = this.scene.getTransformMatrix();
+    ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+    for (const e of this._others.values()) {
+      if (!e.plane || e.plane.isDisposed() || !e.name) continue;
+      const headY = e.plane.position.y + (e._h || 60) / 2 + 6;     // 头顶上方一点
+      const sp = B.Vector3.Project(new B.Vector3(e.plane.position.x, headY, e.plane.position.z), B.Matrix.Identity(), tm, vpw);
+      if (sp.z < 0 || sp.z > 1) continue;                          // 相机后方
+      const x = sp.x; let y = sp.y;
+      if (e.maxHP > 0) {                                            // 血条
+        const bw = 40, bh = 4, ratio = Math.max(0, Math.min(1, e.hp / e.maxHP));
+        ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(x - bw / 2 - 1, y - bh - 1, bw + 2, bh + 2);
+        ctx.fillStyle = "#400"; ctx.fillRect(x - bw / 2, y - bh, bw, bh);
+        ctx.fillStyle = e.kind === "monster" ? "#d33" : "#3c5"; ctx.fillRect(x - bw / 2, y - bh, bw * ratio, bh);
+        y -= bh + 3;
+      }
+      ctx.font = "11px system-ui";                                 // 名字
+      ctx.fillStyle = "rgba(0,0,0,.75)"; ctx.fillText(e.name, x + 1, y - 1);
+      ctx.fillStyle = e.kind === "monster" ? "#f9a" : (e.kind === "npc" ? "#9cf" : "#ffe8c8"); ctx.fillText(e.name, x, y - 2);
+    }
+    // 飘字(伤害数字): 上升 + 淡出, 900ms 后移除。
+    const now = performance.now();
+    if (this._floaters.length) {
+      ctx.font = "bold 15px system-ui";
+      this._floaters = this._floaters.filter((f) => {
+        const t = (now - f.t0) / 900; if (t >= 1) return false;
+        const sp = B.Vector3.Project(new B.Vector3(f.x, f.y, f.z), B.Matrix.Identity(), tm, vpw);
+        if (sp.z < 0 || sp.z > 1) return true;
+        const fx = sp.x, fy = sp.y - 4 - t * 34; ctx.globalAlpha = 1 - t;
+        ctx.fillStyle = "rgba(0,0,0,.8)"; ctx.fillText(f.text, fx + 1, fy + 1);
+        ctx.fillStyle = f.color; ctx.fillText(f.text, fx, fy);
+        return true;
+      });
+      ctx.globalAlpha = 1;
+    }
   }
 }
