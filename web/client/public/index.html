@@ -306,8 +306,8 @@ function maybeReconnect() {
   renderer.clearOthers();                                    // 旧他人 objectID 失效, 清掉
   setTimeout(() => { if (!deliberateClose) connectLogin(); }, delay);
 }
-// HP/MP 状态(协议忠实解析并维护) + 开源血法条 HUD(HPBar<Race>.spk)。
-const hpmp = { hp: 0, hpMax: 1, mp: 0, mpMax: 1 };
+// 角色状态(协议忠实解析并维护): HP/MP + 等级/经验/属性 等。开源血法条 HUD(HPBar<Race>.spk)。
+const hpmp = { hp: 0, hpMax: 1, mp: 0, mpMax: 1, level: 0, exp: 0, str: 0, dex: 0, int: 0, strMax: 0, dexMax: 0, intMax: 0, strExp: 0, dexExp: 0, intExp: 0, gold: 0, fame: 0, alignment: 0, bonus: null };
 let hudBar = null, hudLoading = false;
 function updateHud() {
   if (!hudBar && !hudLoading && myRace) {        // 首次(入世后): 按本族加载真实血条美术
@@ -316,9 +316,66 @@ function updateHud() {
     hudBar.load(myRace).then(() => hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax)).catch((e) => { log("HUD 加载失败: " + e.message, "err"); hudBar = null; });
   } else if (hudBar) hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax);
 }
+
+// GC_UPDATE_INFO 全量字段 → 角色状态(三族经验/等级/属性, proto.js 已逐字段解析)。
+function applyCharFull(p) {
+  if (p.level === undefined) return;             // 非完整玩家信息(无 PCInfo2)
+  for (const k of ["level", "exp", "str", "dex", "int", "strMax", "dexMax", "intMax", "strExp", "dexExp", "intExp", "gold", "fame", "alignment", "bonus"])
+    if (p[k] !== undefined) hpmp[k] = p[k];
+  updateCharPanel();
+}
+// ModifyInfo 增量(GC_MODIFY_INFORMATION / 打怪 OK1 / 被打 OK2)按 type 分发 → 状态。type 表见 proto.js readMods。
+const _slayerDomains = {};                        // Slayer 六技能域等级, 取最高作"等级"
+function applyMods(mods) {
+  if (!mods) return;
+  for (const m of mods) {
+    switch (m.type) {
+      case 12: hpmp.hp = m.value; break;  case 13: hpmp.hpMax = m.value; break;
+      case 14: hpmp.mp = m.value; break;  case 15: hpmp.mpMax = m.value; break;
+      case 1: hpmp.str = m.value; break;  case 5: hpmp.dex = m.value; break;  case 9: hpmp.int = m.value; break;
+      case 2: hpmp.strMax = m.value; break; case 6: hpmp.dexMax = m.value; break; case 10: hpmp.intMax = m.value; break;
+      case 3: hpmp.strExp = m.value; break; case 7: hpmp.dexExp = m.value; break; case 11: hpmp.intExp = m.value; break;
+      case 22: hpmp.fame = m.value; break; case 23: hpmp.gold = m.value; break;
+      case 43: hpmp.level = m.value; break; case 47: hpmp.bonus = m.value; break;
+      case 50: case 59: hpmp.exp = m.value; break;                 // 吸血鬼(50)/异界者(59)经验(到下一级)
+      case 53: hpmp.alignment = m.value | 0; break;
+      case 24: case 27: case 30: case 33: case 36: case 39:        // Slayer 技能域等级 → 取最高
+        _slayerDomains[m.type] = m.value; hpmp.level = Math.max(hpmp.level, ...Object.values(_slayerDomains)); break;
+    }
+  }
+  updateHud(); updateCharPanel();
+}
+
+// 角色信息面板(C 键开关)。数据忠实来自服务端; 美术暂用 DOM(infoXXX.spk 完整面板留后续)。
+let charPanel = null;
+function ensureCharPanel() {
+  if (charPanel) return charPanel;
+  const d = document.createElement("div"); d.id = "charPanel";
+  d.style.cssText = "position:absolute;right:14px;top:60px;z-index:20;display:none;min-width:190px;padding:10px 13px;background:rgba(20,16,10,.92);border:1px solid #6a5a3a;border-radius:6px;color:#e8d8b0;font:12px/1.75 monospace;box-shadow:0 2px 14px #000a;pointer-events:none;";
+  $("game").appendChild(d); charPanel = d; return d;
+}
+function updateCharPanel() {
+  if (!charPanel || charPanel.style.display === "none") return;
+  const raceCN = { slayer: "屠夫", vampire: "吸血鬼", ousters: "魔灵" }[myRace] || myRace || "";
+  const expLine = (myRace === "slayer")
+    ? `力/敏/智经验: ${hpmp.strExp} / ${hpmp.dexExp} / ${hpmp.intExp}`
+    : `距下一级: ${hpmp.exp}`;
+  charPanel.innerHTML =
+    `<div style="font-size:13px;color:#ffd87a;border-bottom:1px solid #6a5a3a;margin-bottom:6px;padding-bottom:4px">${myCharName || ""} · ${raceCN}</div>`
+    + `等级: <b style="color:#ffd87a">${hpmp.level}</b>${myRace === "slayer" ? " <span style='color:#9a8'>技能域</span>" : ""}<br>`
+    + `HP: ${hpmp.hp}/${hpmp.hpMax}${hpmp.mpMax > 0 ? `　MP: ${hpmp.mp}/${hpmp.mpMax}` : ""}<br>`
+    + `力STR: ${hpmp.str}　敏DEX: ${hpmp.dex}　智INT: ${hpmp.int}<br>`
+    + expLine + `<br>`
+    + `善恶: ${hpmp.alignment}　名望: ${hpmp.fame}<br>`
+    + `金钱: ${hpmp.gold}` + (hpmp.bonus != null ? `　加点: ${hpmp.bonus}` : "");
+}
+window.addEventListener("keydown", (e) => {
+  if (e.target && e.target.tagName === "INPUT") return;          // 聊天/输入聚焦时不触发
+  if (e.key === "c" || e.key === "C") { const d = ensureCharPanel(); d.style.display = d.style.display === "none" ? "block" : "none"; updateCharPanel(); }
+});
 function onGamePacket(p) {
   if (p.name === "GC_UPDATE_INFO") {
-    if (p.curHP !== undefined) { hpmp.hp = p.curHP; hpmp.hpMax = p.maxHP || 1; hpmp.mp = p.curMP; hpmp.mpMax = p.maxMP || 1; updateHud(); }
+    if (p.curHP !== undefined) { hpmp.hp = p.curHP; hpmp.hpMax = p.maxHP || 1; hpmp.mp = p.curMP; hpmp.mpMax = p.maxMP || 1; updateHud(); applyCharFull(p); }
     // 真实 zone: 从包解析(三族均对真实包核对)。决定加密 code + 加载哪张图(含传送换区)。
     const parsed = (p.zoneID && ZONEMAP[p.zoneID]) ? p.zoneID : null;
     if (parsed === null && player) {
@@ -340,8 +397,8 @@ function onGamePacket(p) {
   else if (p.name === "GC_MOVE_OK") { renderer.serverStep(p.x, p.y, p.dir); }
   else if (p.name === "GC_MOVE_ERROR") { renderer.serverReject(p.x, p.y); }
   else if (p.name === "GC_SAY") { log(`玩家#${p.objectID}: ${p.message}`, "info"); } // 附近玩家聊天
-  else if (p.name === "GC_MODIFY_INFORMATION") { // HP/MP 等属性变化(type 12~15): 维护状态, 显示待真实 gauge
-    if (p.mods) { for (const m of p.mods) { if (m.type === 12) hpmp.hp = m.value; else if (m.type === 13) hpmp.hpMax = m.value; else if (m.type === 14) hpmp.mp = m.value; else if (m.type === 15) hpmp.mpMax = m.value; } updateHud(); }
+  else if (p.name === "GC_MODIFY_INFORMATION") { // HP/MP/经验/等级/属性 增量: 按 type 分发到状态
+    applyMods(p.mods);
   }
   // ── 其他玩家可见(三族, 各自精灵包) ──
   else if (p.name === "GC_ADD_SLAYER" || p.name === "GC_ADD_VAMPIRE" || p.name === "GC_ADD_OUSTERS") { addOtherPlayer(p.creature); }
@@ -349,11 +406,11 @@ function onGamePacket(p) {
   else if (p.name === "GC_MOVE") { renderer.otherStep(p.objectID, p.x, p.y, p.dir); }   // 他人移动
   else if (p.name === "GC_DELETE_OBJECT") { renderer.removeOther(p.objectID); }          // 他人离开视野
   // ── 战斗(复刻开源近战流程) ──
-  else if (p.name === "GC_ATTACK_MELEE_OK_1") {   // 我命中确认: 自身ModifyInfo(经验/属性), HP/MP 变化即更HUD
-    if (p.mods) { for (const m of p.mods) { if (m.type === 12) hpmp.hp = m.value; else if (m.type === 13) hpmp.hpMax = m.value; else if (m.type === 14) hpmp.mp = m.value; else if (m.type === 15) hpmp.mpMax = m.value; } updateHud(); }
+  else if (p.name === "GC_ATTACK_MELEE_OK_1") {   // 我命中确认: 自身ModifyInfo(经验/属性/HP) → 状态
+    applyMods(p.mods);
   }
-  else if (p.name === "GC_ATTACK_MELEE_OK_2") {   // 我被怪攻击: ModifyInfo 含我方HP变化 → 更HUD; 攻击者播攻击动画
-    if (p.mods) { for (const m of p.mods) { if (m.type === 12) hpmp.hp = m.value; else if (m.type === 13) hpmp.hpMax = m.value; else if (m.type === 14) hpmp.mp = m.value; else if (m.type === 15) hpmp.mpMax = m.value; } updateHud(); }
+  else if (p.name === "GC_ATTACK_MELEE_OK_2") {   // 我被怪攻击: ModifyInfo 含我方HP变化 → 状态; 攻击者播攻击动画
+    applyMods(p.mods);
     renderer.otherAttack(p.objectID);
   }
   else if (p.name === "GC_ATTACK_MELEE_OK_3") { renderer.otherAttack(p.objectID); }        // 旁观: 攻击者播攻击动画

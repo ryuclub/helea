@@ -287,18 +287,20 @@ function skipPCItem(r) {
 // competence(u8), guildID(u16), guildName(u8+), guildMemberRank(u8), unionID(u32), advLevel(u8), advGoalExp(u32), attrBonus(u16)。
 function readSlayerInfo2(r) {
   r.u32(); const n = r.u8(); for (let i = 0; i < n; i++) r.u8();
-  r.u8(); r.u8(); r.u16(); r.u16(); r.u8(); r.i32();
-  for (let i = 0; i < 9; i++) r.u16();           // STR/DEX/INT 各 3
-  r.u8(); r.u32(); r.u32(); r.u32(); r.u32();    // rank,rankExp, STR/DEX/INTExp
+  r.u8(); r.u8(); r.u16(); r.u16(); r.u8(); const alignment = r.i32();
+  // STR/DEX/INT 各[BASIC,CURRENT,MAX]; 取 CURRENT(下标1) 作显示值, MAX(下标2) 作上限
+  const sB = r.u16(), sC = r.u16(), sM = r.u16(), dB = r.u16(), dC = r.u16(), dM = r.u16(), iB = r.u16(), iC = r.u16(), iM = r.u16();
+  r.u8(); r.u32(); const strExp = r.u32(), dexExp = r.u32(), intExp = r.u32();    // rank,rankExp, STR/DEX/INTExp
   const curHP = r.u16(), maxHP = r.u16(), curMP = r.u16(), maxMP = r.u16(); // HP[2],MP[2]
-  r.u32(); r.u32();                              // fame,gold
-  for (let i = 0; i < 6; i++) { r.u8(); r.u32(); } // domains
+  const fame = r.u32(), gold = r.u32();          // fame,gold
+  let level = 0; for (let i = 0; i < 6; i++) { const dl = r.u8(); r.u32(); if (dl > level) level = dl; } // Slayer 等级=六技能域最高级
   r.u8();                                         // sight
   for (let i = 0; i < 4; i++) r.u16();           // hotkey[4]
   r.u8(); r.u16();                               // competence,guildID
   const g = r.u8(); for (let i = 0; i < g; i++) r.u8(); // guildName
   r.u8(); r.u32(); r.u8(); r.u32(); r.u16();     // guildMemberRank,unionID,advLevel,advGoalExp,attrBonus
-  return { curHP, maxHP, curMP, maxMP };
+  // Slayer 无单一经验, 经验=分属性经验(strExp/dexExp/intExp 为到下一级所需)
+  return { curHP, maxHP, curMP, maxMP, level, str: sC, dex: dC, int: iC, strMax: sM, dexMax: dM, intMax: iM, strExp, dexExp, intExp, fame, gold, alignment, race: "slayer" };
 }
 // 完整推进 PCVampireInfo2(GC_UPDATE_INFO 吸血鬼): objID,name, level(u8),sex(u8), batColor(u16),skinColor(u16),
 // masterEffectColor(u8), alignment(i32), STR/DEX/INT 各[3]u16, HP[2]u16(无 MP), rank(u8),rankExp(u32),
@@ -306,30 +308,44 @@ function readSlayerInfo2(r) {
 // guildID(u16), guildName(u8+), guildMemberRank(u8), unionID(u32), advLevel(u8), advGoalExp(u32)。
 function readVampireInfo2(r) {
   r.u32(); const n = r.u8(); for (let i = 0; i < n; i++) r.u8();
-  r.u8(); r.u8(); r.u16(); r.u16(); r.u8(); r.i32();
-  for (let i = 0; i < 9; i++) r.u16();
+  const level = r.u8(); r.u8(); r.u16(); r.u16(); r.u8(); const alignment = r.i32(); // level,sex,batColor,skinColor,masterEffectColor,alignment
+  const sB = r.u16(), sC = r.u16(), sM = r.u16(), dB = r.u16(), dC = r.u16(), dM = r.u16(), iB = r.u16(), iC = r.u16(), iM = r.u16();
   const curHP = r.u16(), maxHP = r.u16();         // HP[2] (吸血鬼无 MP)
-  r.u8(); r.u32(); r.u32(); r.u32(); r.u32();     // rank,rankExp,exp,gold,fame
-  r.u8(); r.u16();                                // sight,bonus
+  r.u8(); r.u32(); const exp = r.u32(), gold = r.u32(), fame = r.u32(); // rank,rankExp,exp,gold,fame
+  r.u8(); const bonus = r.u16();                  // sight,bonus(自由加点)
   for (let i = 0; i < 8; i++) r.u16();            // hotkey[8]
   r.u16(); r.u8(); r.u16();                       // silverDamage,competence,guildID
   const g = r.u8(); for (let i = 0; i < g; i++) r.u8();
   r.u8(); r.u32(); r.u8(); r.u32();               // guildMemberRank,unionID,advLevel,advGoalExp
-  return { curHP, maxHP, curMP: 0, maxMP: 0 };
+  // 吸血鬼: 单一 level + exp(到下一级所需 GoalExp) + bonus 自由加点
+  return { curHP, maxHP, curMP: 0, maxMP: 0, level, str: sC, dex: dC, int: iC, strMax: sM, dexMax: dM, intMax: iM, exp, bonus, fame, gold, alignment, race: "vampire" };
 }
 // PCOustersInfo2: 单 hairColor(u16), HP[2]+MP[2], bonus+skillBonus, 无 hotkey。
 function readOustersInfo2(r) {
   r.u32(); const n = r.u8(); for (let i = 0; i < n; i++) r.u8();
-  r.u8(); r.u8(); r.u16(); r.u8(); r.i32();       // level,sex,hairColor,masterEffectColor,alignment
-  for (let i = 0; i < 9; i++) r.u16();
+  const level = r.u8(); r.u8(); r.u16(); r.u8(); const alignment = r.i32(); // level,sex,hairColor,masterEffectColor,alignment
+  const sB = r.u16(), sC = r.u16(), sM = r.u16(), dB = r.u16(), dC = r.u16(), dM = r.u16(), iB = r.u16(), iC = r.u16(), iM = r.u16();
   const curHP = r.u16(), maxHP = r.u16(), curMP = r.u16(), maxMP = r.u16(); // HP[2],MP[2]
-  r.u8(); r.u32(); r.u32(); r.u32(); r.u32();     // rank,rankExp,exp,gold,fame
-  r.u8(); r.u16(); r.u16();                       // sight,bonus,skillBonus
+  r.u8(); r.u32(); const exp = r.u32(), gold = r.u32(), fame = r.u32();     // rank,rankExp,exp,gold,fame
+  r.u8(); const bonus = r.u16(), skillBonus = r.u16();                      // sight,bonus,skillBonus
   r.u16(); r.u8(); r.u16();                       // silverDamage,competence,guildID
   const g = r.u8(); for (let i = 0; i < g; i++) r.u8();
   r.u8(); r.u32(); r.u8(); r.u32();
-  return { curHP, maxHP, curMP, maxMP };
+  // 异界者: 单一 level + exp(GoalExp) + bonus + skillBonus
+  return { curHP, maxHP, curMP, maxMP, level, str: sC, dex: dC, int: iC, strMax: sM, dexMax: dM, intMax: iM, exp, bonus, skillBonus, fame, gold, alignment, race: "ousters" };
 }
+// ModifyInfo 通用解析(GC_MODIFY_INFORMATION / GCAttackMeleeOK1·2 共用)。
+// short 项{type,value u16}, long 项{type,value u32,wide}。★经验全在 long 项, 旧实现误丢弃。
+// type 含义(服务端 ModifyInfo.h): 1/5/9=力/敏/智当前, 2/6/10=力/敏/智上限, 3/7/11=力/敏/智经验,
+//   12~15=curHP/maxHP/curMP/maxMP, 22=名望, 23=金钱, 43=等级(吸/异), 47=加点, 50=吸血鬼经验,
+//   53=善恶, 59=异界者经验, 60=异界者技能点, 24/27/30/33/36/39=Slayer 六技能域等级。
+function readMods(r) {
+  const mods = [];
+  const sc = r.u8(); for (let i = 0; i < sc; i++) mods.push({ type: r.u8(), value: r.u16() });
+  const lc = r.u8(); for (let i = 0; i < lc; i++) mods.push({ type: r.u8(), value: r.u32(), wide: true });
+  return mods;
+}
+
 // 从 GC_UPDATE_INFO 解析玩家所在 ZoneID(开源在此包重载 zone)。pcType='S'/'V'/'O'(char)。三族完整解析(均对真实包核对)。
 // 崩溃安全: 任何异常返回 null, 上层保持当前 zone, 绝不送错加密 code。
 function readUpdateInfoZone(r) {
@@ -441,30 +457,19 @@ export function decode(u8) {
     else if (id === PACKET.GC_ADD_MONSTER) { out.creature = readMonster(r); }
     else if (id === PACKET.GC_ADD_NPC) { out.creature = readNPC(r); }
     // 近战命中确认(给攻击者): TargetObjectID + ModifyInfo(攻击者自身属性变化, short{type,value u16}+long{type,value u32})
-    else if (id === PACKET.GC_ATTACK_MELEE_OK_1) {
-      out.objectID = r.u32(); out.mods = [];
-      const sc = r.u8(); for (let i = 0; i < sc; i++) { out.mods.push({ type: r.u8(), value: r.u16() }); }
-      const lc = r.u8(); for (let i = 0; i < lc; i++) { r.u8(); r.u32(); }
-    }
+    else if (id === PACKET.GC_ATTACK_MELEE_OK_1) { out.objectID = r.u32(); out.mods = readMods(r); }   // 命中确认 + 自身属性/经验变化
     // 被怪攻击(给被击玩家): 攻击者ObjectID + ModifyInfo(我方HP变化)。结构同 OK1。
-    else if (id === PACKET.GC_ATTACK_MELEE_OK_2) {
-      out.objectID = r.u32(); out.mods = [];
-      const sc = r.u8(); for (let i = 0; i < sc; i++) { out.mods.push({ type: r.u8(), value: r.u16() }); }
-      const lc = r.u8(); for (let i = 0; i < lc; i++) { r.u8(); r.u32(); }
-    }
+    else if (id === PACKET.GC_ATTACK_MELEE_OK_2) { out.objectID = r.u32(); out.mods = readMods(r); }
     else if (id === PACKET.GC_ATTACK_MELEE_OK_3) { out.objectID = r.u32(); out.targetID = r.u32(); }                 // 旁观者: 攻击者→目标, 播攻击动画
     else if (id === PACKET.GC_STATUS_CURRENT_HP) { out.objectID = r.u32(); out.curHP = r.u16(); }                    // 被击者新HP→血条+伤害飘字
     else if (id === PACKET.GC_ADD_MONSTER_CORPSE) { out.objectID = r.u32(); }                                        // 怪死→移除活体
     // 入世/换区信息: 解析所在 ZoneID + 自身 HP/MP(三族)。失败 zoneID=null → 上层回退, 不送错 code。明文。
     else if (id === PACKET.GC_UPDATE_INFO) {
-      try { const u = readUpdateInfoZone(r); if (u) { out.zoneID = u.zoneID; out.zoneX = u.zoneX; out.zoneY = u.zoneY; out.curHP = u.curHP; out.maxHP = u.maxHP; out.curMP = u.curMP; out.maxMP = u.maxMP; } else out.zoneID = null; }
+      try { const u = readUpdateInfoZone(r); if (u) Object.assign(out, u); else out.zoneID = null; }   // u 含 zone+HP/MP+level/exp/STR/DEX/INT
       catch { out.zoneID = null; }
     }
-    // 属性变化: 收集 short 项 {type,value}(HP/MP 在此; type 12=curHP,13=maxHP,14=curMP,15=maxMP)。long 项跳过。
-    else if (id === PACKET.GC_MODIFY_INFORMATION) {
-      out.mods = []; const sc = r.u8(); for (let i = 0; i < sc; i++) { out.mods.push({ type: r.u8(), value: r.u16() }); }
-      const lc = r.u8(); for (let i = 0; i < lc; i++) { r.u8(); r.u32(); }
-    }
+    // 属性变化(HP/MP/经验/等级/属性…): short+long 全收集(经验在 long), 上层按 type 分发。
+    else if (id === PACKET.GC_MODIFY_INFORMATION) { out.mods = readMods(r); }
   } catch (e) { out._err = e.message; }
   return out;
 }
