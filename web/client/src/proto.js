@@ -75,7 +75,8 @@ export const PACKET = {
   CG_NPC_TALK: 55,                // 点NPC对话(明文 ObjectID u32)
   GC_NPC_SAY_DYNAMIC: 298,        // NPC动态文本(服务端直发GBK中文): ObjID u32+szMsg u8+Message
   GC_NPC_RESPONSE: 296,           // NPC响应: Code u16(+Param u32, 按包长判断); Code=10 QUIT关对话, 其余多为开界面
-  GC_NPC_ASK: 292,                // NPC脚本菜单: ObjID u32+ScriptID u32+NPCID u16(脚本文本锁dpk)
+  GC_NPC_ASK: 292,                // NPC脚本菜单(scriptID, 文本在客户端 NPCScript.inf 韩文原版)
+  GC_NPC_ASK_DYNAMIC: 293,        // ★NPC动态菜单: 服务端直发中文 subject+contents选项(不需客户端表)
   GC_NPC_SAY: 297,                // NPC静态文本(ScriptID, 文本锁dpk)
   // ── 商店(全部明文) ──
   CG_SHOP_REQUEST_LIST: 101,      // 请求商品列表: ObjID u32+RackType u8
@@ -649,6 +650,12 @@ export function decode(u8) {
     else if (id === PACKET.GC_NPC_RESPONSE) { out.code = r.u16(); if (size >= 6) out.parameter = r.u32(); }
     // NPC 脚本菜单/静态文本: 文本按 ScriptID 查客户端 NPCScript.inf(锁 dpk) → 仅解析结构, 文本暂缺。
     else if (id === PACKET.GC_NPC_ASK) { out.objectID = r.u32(); out.scriptID = r.u32(); out.npcID = r.u16(); }
+    else if (id === PACKET.GC_NPC_ASK_DYNAMIC) {                                                          // 中文动态菜单(GCNPCAskDynamic): ObjID+ScriptID+Subject(u16len+str)+ContentsCount+Contents[u16len+str]
+      out.objectID = r.u32(); out.scriptID = r.u32();
+      const sl = r.u16(); const sb = []; for (let i = 0; i < sl; i++) sb.push(r.u8()); out.subject = gbkDecode(Uint8Array.from(sb));
+      out.contentsCount = r.u8(); out.contents = [];
+      for (let i = 0; i < out.contentsCount; i++) { const cl = r.u16(); const cb = []; for (let j = 0; j < cl; j++) cb.push(r.u8()); out.contents.push(gbkDecode(Uint8Array.from(cb))); }
+    }
     else if (id === PACKET.GC_NPC_SAY) { out.objectID = r.u32(); out.scriptID = r.u32(); out.subjectID = r.u8(); }
     // ── 商店 ──
     // 商品列表: ObjID u32+Version i32+RackType u8+件数 u8 + 每件{idx u8, item, 价格 silver} + 市价 i16×2 + ShopType u8。

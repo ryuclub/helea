@@ -486,7 +486,21 @@ function ensureShopUI() {
   shopUI.setSellHandler((on) => { shopSellMode = on; });
   return shopUI;
 }
-// NPC 菜单(降级: 脚本菜单文本锁dpk → 手搓"购买/离开"按钮)。
+// NPC 动态菜单(GCNPCAskDynamic 293): 服务端直发中文 subject+contents选项。点选项推进 quest 对话。
+function showNPCAsk(objectID, name, subject, contents) {
+  const d = ensureNPCDialog();
+  const esc = (s) => String(s || "").replace(/</g, "&lt;");
+  let html = `<div style="font-size:15px;color:#ffd87a;border-bottom:1px solid #8a6a3a;margin-bottom:8px;padding-bottom:5px">${esc(name)}</div>`;
+  if (subject) html += `<div style="margin-bottom:10px;line-height:1.7">${esc(subject)}</div>`;
+  html += `<div style="display:flex;flex-direction:column;gap:6px">`;
+  (contents || []).forEach((c, i) => { html += `<span class="npcOpt" data-i="${i}" style="cursor:pointer;color:#ffd87a;border:1px solid #8a6a3a;border-radius:4px;padding:5px 12px">${esc(c)}</span>`; });
+  html += `</div><div style="display:flex;gap:10px;justify-content:flex-end;margin-top:8px">`
+    + `<span id="npcClose2" style="cursor:pointer;color:#e8d8b0;border:1px solid #6a5a3a;border-radius:4px;padding:3px 14px">离开</span></div>`;
+  d.innerHTML = html; d.style.display = "block";
+  d.querySelectorAll(".npcOpt").forEach((el) => el.onclick = () => { if (gws && gws.readyState === 1) gws.send(encCGNPCTalk(objectID)); });   // 点选项→推进 quest 对话(服务端续发下个菜单/对话/商店)
+  $("npcClose2").onclick = hideNPCDialog;
+}
+// NPC 菜单(GC_NPC_ASK 292 无文本变体: scriptID→客户端 NPCScript.inf 韩文原版; 暂保留商店入口)。
 function showNPCMenu(objectID, name) {
   const d = ensureNPCDialog();
   d.innerHTML = `<div style="font-size:15px;color:#ffd87a;border-bottom:1px solid #8a6a3a;margin-bottom:8px;padding-bottom:5px">${(name || "NPC").replace(/</g, "&lt;")}</div>`
@@ -574,7 +588,8 @@ function onGamePacket(p) {
     if (p.code === 10) hideNPCDialog();                                                                    // QUIT_DIALOGUE: 关对话
     else log(`◀ NPC响应 code=${p.code}${p.parameter !== undefined ? " param=" + p.parameter : ""}(开界面待实现)`, "info");
   }
-  else if (p.name === "GC_NPC_ASK") { const e = renderer._others.get(p.objectID); showNPCMenu(p.objectID, e ? e.name : "NPC"); }   // 脚本菜单(文本锁dpk)→降级购买入口
+  else if (p.name === "GC_NPC_ASK") { const e = renderer._others.get(p.objectID); showNPCMenu(p.objectID, e ? e.name : "NPC"); }   // 292 无文本→降级商店入口
+  else if (p.name === "GC_NPC_ASK_DYNAMIC") { const e = renderer._others.get(p.objectID); showNPCAsk(p.objectID, e ? e.name : "NPC", p.subject, p.contents); }   // 293 服务端中文菜单
   else if (p.name === "GC_NPC_SAY") { log(`◀ GC_NPC_SAY scriptID=${p.scriptID}(脚本文本锁dpk)`, "info"); }
   // ── 商店 ──
   else if (p.name === "GC_SHOP_LIST") { const s = ensureShopUI(); if (invUI && invUI.itemPack) s.setItemPack(invUI.itemPack); s.open(p.objectID, p); log(`◀ 商店 ${p.items.length} 件商品`, "ok"); }
@@ -772,7 +787,7 @@ function selectAndEnter(ch) {
   loginWS.send(encCLSelectPC({ pcName: ch.nameBytes, pcType: raceType(myRace) }));
 }
 // 调试钩子(真机验证脚本用): 程序化登录/选角, 绕开画布登录屏点击。
-window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreature: loadCreatureAssets, monsterFrameID, spriteFrameID };
+window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreature: loadCreatureAssets, monsterFrameID, spriteFrameID, showNPCAsk };
 // 渲染服务端角色列表: 每个角色一个按钮(可选), 有空槽再给「创建新角色」入口。
 function renderPCList(p) {
   const box = $("pclist"); box.style.display = "block";
