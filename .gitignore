@@ -31,3 +31,4 @@ node_modules/
 
 # 项目通用工具配置(非 Helea 代码, 保持本地)
 .claude/
+DARKEDEN/

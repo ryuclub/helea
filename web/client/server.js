@@ -7,10 +7,61 @@ import { execFile } from "node:child_process";
 
 const ROOT = import.meta.dirname;
 const PORT = Number(process.env.PORT || 8095);
-// 开源界面资源(发行包 Data/Ui): UI spk/spki/ifr 真实美术与布局, 直接按原始路径服务(不复制)。
-const UIROOT = path.resolve(ROOT, "..", "..", "DarkEden Legend New Version April 2026", "Data", "Ui");
-// 物品图标资源(发行包 Data/new_item): item.ispk/.ispki 等, 直接按原始路径服务(不复制)。
-const ITEMROOT = path.resolve(ROOT, "..", "..", "DarkEden Legend New Version April 2026", "Data", "new_item");
+// ★全面切换到 opendarkeden 官方配套资源(DARKEDEN/Data) —— 与服务端ID体系完全匹配, 全明文(无加密dpk)。
+const DKDATA = path.resolve(ROOT, "..", "..", "DARKEDEN", "Data");
+const UIROOT = path.join(DKDATA, "Ui");          // UI spk (/ui/)
+const ITEMROOT = path.join(DKDATA, "Ui", "spk"); // 物品图标 Item.ispk (/item/)
+const INFOROOT = path.join(DKDATA, "Info");      // inf 表 (/info/): Item/CreatureSprite/AddonSprite/NPCScript
+const IMAGEROOT = path.join(DKDATA, "Image");    // 精灵图: cfpk/ispk/tile.spk/imageobject.spk
+const MAPROOT = path.join(DKDATA, "Map");        // 地图 .map
+
+// 官方资源是单文件 .ispk/.spk + .spki 索引(u16 count + i32 offsets)。客户端按"分块"请求(每块N个 sprite),
+// server 动态从单文件按 .spki 偏移切块返回(块格式=[u16 count][sprite字节连续], 兼容 loadSpritesById/TileSet)。
+const _offCache = new Map();   // spkiPath -> [offsets..., spkSize哨兵]
+function getOffsets(spkiPath, spkPath) {
+  let o = _offCache.get(spkiPath);
+  if (!o) {
+    const b = fs.readFileSync(spkiPath); const n = b.readUInt16LE(0); o = [];
+    for (let i = 0; i < n; i++) o.push(b.readInt32LE(2 + i * 4));
+    o.push(fs.statSync(spkPath).size);   // 末尾哨兵=文件大小, 供最后一块取到结尾
+    _offCache.set(spkiPath, o);
+  }
+  return o;
+}
+// 动态切块: 第 chunkStart 起 chunkSize 个 sprite → [u16 count][连续sprite字节]。Promise<Buffer>。
+function chunkPack(spkPath, spkiPath, chunkStart, chunkSize) {
+  return new Promise((resolve, reject) => {
+    let offsets; try { offsets = getOffsets(spkiPath, spkPath); } catch (e) { return reject(e); }
+    const total = offsets.length - 1;
+    const start = Math.min(chunkStart, total), end = Math.min(start + chunkSize, total);
+    const head = Buffer.alloc(2); head.writeUInt16LE(end - start);
+    if (end <= start) return resolve(head);          // 空块
+    const byteStart = offsets[start], len = offsets[end] - byteStart;
+    fs.open(spkPath, "r", (e, fd) => {
+      if (e) return reject(e);
+      const body = Buffer.alloc(len);
+      fs.read(fd, body, 0, len, byteStart, (e2) => { fs.close(fd, () => {}); e2 ? reject(e2) : resolve(Buffer.concat([head, body])); });
+    });
+  });
+}
+// 切块结果常驻缓存(运行期资源不变, 切一次即缓存; 同 sendFile 的目的: 杜绝重复 IO/句柄突发)。
+const _chunkCache = new Map();   // 请求路径 -> Buffer
+function serveChunk(res, spkPath, spkiPath, start, size, cacheKey) {
+  const headers = { "Content-Type": "application/octet-stream", "Cache-Control": "no-cache, no-store, must-revalidate" };
+  const hit = _chunkCache.get(cacheKey);
+  if (hit) { res.writeHead(200, headers); res.end(hit); return; }
+  chunkPack(spkPath, spkiPath, start, size)
+    .then((buf) => { _chunkCache.set(cacheKey, buf); res.writeHead(200, headers); res.end(buf); })
+    .catch((e) => { const code = (e && e.code === "ENOENT") ? 404 : 500; res.writeHead(code); res.end(String(code)); });
+}
+
+// 官方 Image 文件名是驼峰(Creature.cfpk/ACVampireMan.ispk), 客户端请小写 → mac 文件系统不敏感可直接命中,
+// 但为跨平台稳妥, 提供小写→实际名映射(扫一次 Image 目录建表)。
+let _imageNameMap = null;
+function realImageName(lower) {
+  if (!_imageNameMap) { _imageNameMap = new Map(); try { for (const f of fs.readdirSync(IMAGEROOT)) _imageNameMap.set(f.toLowerCase(), f); } catch {} }
+  return _imageNameMap.get(lower.toLowerCase()) || lower;
+}
 
 // 通过 docker exec 跑 mysql。id/password 已严格限定 [A-Za-z0-9], 无注入风险。
 function mysql(sql) {
@@ -88,9 +139,35 @@ http.createServer((req, res) => {
   if (p.startsWith("/ui/")) {
     file = path.join(UIROOT, p.slice(4));
     if (!file.startsWith(UIROOT)) { res.writeHead(404); res.end("404"); return; }
-  } else if (p.startsWith("/item/")) {                          // 物品图标: /item/item.ispk → Data/new_item/
+  } else if (p.startsWith("/item/")) {                          // 物品图标: /item/Item.ispk → Data/Ui/spk/
     file = path.join(ITEMROOT, p.slice(6));
     if (!file.startsWith(ITEMROOT)) { res.writeHead(404); res.end("404"); return; }
+  } else if (p.startsWith("/info/")) {                          // inf 表: /info/Item.inf → Data/Info/
+    file = path.join(INFOROOT, p.slice(6));
+    if (!file.startsWith(INFOROOT)) { res.writeHead(404); res.end("404"); return; }
+  } else if (p.startsWith("/public/assets/")) {
+    // ★全面切到官方资源: 客户端按"分块路径"请求, 这里从官方单文件(.ispk/.spk + .spki)动态切块返回。
+    const rel = p.slice("/public/assets/".length);
+    let m;
+    if ((m = rel.match(/^map\/(.+\.map)$/))) {                  // 地图: map/X.map → Data/Map/X.map
+      return sendFile(res, path.join(MAPROOT, path.basename(m[1])));
+    }
+    if ((m = rel.match(/^tile\/(\d+)\.spk$/))) {                // 瓦片块(chunkSize 128)
+      return serveChunk(res, path.join(IMAGEROOT, "tile.spk"), path.join(IMAGEROOT, "tile.spki"), parseInt(m[1], 10), 128, p);
+    }
+    if ((m = rel.match(/^obj\/(\d+)\.spk$/))) {                 // 物件块(chunkSize 16)
+      return serveChunk(res, path.join(IMAGEROOT, "ImageObject.spk"), path.join(IMAGEROOT, "ImageObject.spki"), parseInt(m[1], 10), 16, p);
+    }
+    if ((m = rel.match(/^(.+)\.ispk\/(\d+)\.ispk$/))) {         // 精灵块 {pack}.ispk/NN.ispk(chunkSize 64)
+      const spk = realImageName(m[1] + ".ispk"), spki = realImageName(m[1] + ".ispki");
+      return serveChunk(res, path.join(IMAGEROOT, spk), path.join(IMAGEROOT, spki), parseInt(m[2], 10), 64, p);
+    }
+    if ((m = rel.match(/^(.+\.cfpk)$/))) {                      // 整 cfpk 直接发(客户端整包解析)
+      return sendFile(res, path.join(IMAGEROOT, realImageName(m[1])));
+    }
+    // 其余(zonemap.json 等实体)→ web/client/public/assets/
+    file = path.join(ROOT, p);
+    if (!file.startsWith(ROOT)) { res.writeHead(404); res.end("404"); return; }
   } else {
     file = path.join(ROOT, p);
     if (!file.startsWith(ROOT)) { res.writeHead(404); res.end("404"); return; }

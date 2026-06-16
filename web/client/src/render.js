@@ -186,6 +186,7 @@ void main(){
 
   _addBlock(key, data) {
     const B = BABYLON, blk = this._blocks.get(key); if (!blk) return;
+    if (!data || !data.canvas || !data.width || !data.height) { blk.loading = false; return; }   // 空块(地图边缘/0尺寸)跳过, 避免 drawImage 报错
     // 地面(单块小贴图, 真机 1-2ms)
     const tex = new B.DynamicTexture("g", { width: data.width, height: data.height }, this.scene, false, B.Texture.NEAREST_SAMPLINGMODE);
     tex.getContext().drawImage(data.canvas, 0, 0); tex.update(); tex.hasAlpha = true;
