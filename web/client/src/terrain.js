@@ -56,6 +56,10 @@ export async function initTerrain(cfg) {
   if (cfg.objBase) {
     _objSet = new TileSet((name) => _buf.get(`${cfg.objBase}/${name}`) ?? null, 16);
     // 整区全部物件(不分桶): 进区后由 buildZoneObjects 一次性全载、整区常驻(对齐开源)。
+    // 只渲染 type3(IMAGEOBJECT)。type5/7 经全量排查(2026-06-16)无法渲染:
+    //   · type7(交互)在全部 136 张图中 0 个;
+    //   · type5(动画)全是 base spriteID=65535 的纯动画, 视觉靠 AnimationObject.afpk 帧包[frameID][frame],
+    //     但发行包 afpk 只 4 个帧集、对象却引用 frameID 3000+(越界), 开源 `if(fid<size)` 亦跳过 → 资源残缺, 非代码可补。
     _allObjs = (parseImageObjects(mb, _map).objs || []).filter((o) => o.spriteID !== 65535 && o.type === 3);
   }
   return _map;
