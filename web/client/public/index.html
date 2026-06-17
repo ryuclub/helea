@@ -395,7 +395,8 @@ function showLevelUp(level) {
       + "font:bold 36px 'Microsoft YaHei',system-ui;color:#ffe27a;text-shadow:0 0 14px #ffae00,0 2px 6px #000;opacity:0;transition:opacity .3s ease,top .9s ease;white-space:nowrap;";
     $("game").appendChild(_levelUpEl);
   }
-  _levelUpEl.innerHTML = `⬆ 升级！<br><span style="font-size:23px">等级 ${level}</span>`;
+  _levelUpEl.innerHTML = `⬆ 升级！<br><span style="font-size:23px">等级 ${level}</span>`
+    + (hpmp.bonus > 0 ? `<br><span style="font-size:15px;color:#9f9;text-shadow:0 1px 3px #000">可分配 ${hpmp.bonus} 点 · 按 C 加点</span>` : "");  // 升级有点→引导加点(连接升级↔加点)
   _levelUpEl.style.top = "40%"; _levelUpEl.style.opacity = "1";
   clearTimeout(_levelUpTimer);
   _levelUpTimer = setTimeout(() => { _levelUpEl.style.opacity = "0"; _levelUpEl.style.top = "33%"; }, 1900);
