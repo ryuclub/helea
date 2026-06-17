@@ -82,13 +82,14 @@ import { LoginScreen } from "../src/ui-login.js";
 import { CharSelectScreen } from "../src/ui-charselect.js";
 import { CharCreateScreen } from "../src/ui-charcreate.js";
 import { QuickBar } from "../src/ui-quickbar.js";
+import { SkillBar } from "../src/ui-skillbar.js";
 import { HudHpBar } from "../src/ui-hud.js";
 import { InventoryUI } from "../src/ui-inventory.js";
 import { ShopUI } from "../src/ui-shop.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCLQueryCharacterName, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
   encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell, encCGUsePotionFromInventory,
-  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot, encCGUseBonusPoint,
+  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot, encCGUseBonusPoint, encCGSkillToObject,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 import { loadItemInf, getItemInfo } from "../src/iteminfo.js";
 import { loadMonsterMap, loadCreatureSprite, monsterFrameID, spriteFrameID } from "../src/creature-sprite.js";
@@ -269,6 +270,8 @@ async function placePlayerAt(x, y) {
         renderer.setNetMove((dir, cx, cy) => { if (gws && gws.readyState === 1) gws.send(encCGMove({ dir, x: cx, y: cy })); });
         // 普攻: 点怪 → 渲染器回调送 CG_ATTACK(目标ObjectID + 我当前格/朝向, 加密 SHUFFLE_4)。
         renderer.setNetAttack((targetID) => { if (gws && gws.readyState === 1 && player) gws.send(encCGAttack({ targetID, x: player.col, y: player.row, dir: player.dir })); });
+        // 技能: 已装填技能时点怪 → 送 CG_SKILL_TO_OBJECT(SkillType+CEffectID递增+目标, SHUFFLE_3)。回 OK_1~6(命中)/FAILED(无效/距离/冷却)。
+        renderer.setNetSkill((targetID, skill) => { if (gws && gws.readyState === 1) gws.send(encCGSkillToObject({ skillType: skill.skillType, targetID, effectID: (skillEffectSeq = (skillEffectSeq + 1) & 0xffff) })); });
         // 点地面物品 → 拾取: 找首个空背包格, 发 CGAddZoneToInventory(SHUFFLE_5)。服务端回 GCCreateItem(入包)+GCDeleteAndPickupOK(移除地面)。
         renderer.setNetPickup((objectID) => {
           const g = groundItems[objectID]; if (!g) return;
@@ -462,6 +465,7 @@ window.addEventListener("keydown", (e) => {
   if (e.target && e.target.tagName === "INPUT") return;          // 聊天/输入聚焦时不触发
   if (e.key === "c" || e.key === "C") { const d = ensureCharPanel(); d.style.display = d.style.display === "none" ? "block" : "none"; updateCharPanel(); }
   else if (e.key === "i" || e.key === "I") { const ui = ensureInvUI(); if (ui) ui.toggle(); }   // 背包/装备开关
+  else if (e.key === "Escape") { if (skillBar) skillBar.disarm(); if (renderer) renderer.armSkill(null); }   // 取消技能装填
 });
 
 // 背包/装备状态(协议忠实维护) + 开源资源 UI(inventory/gear spk)。
@@ -542,6 +546,19 @@ function ensureQuickBar() {
     log(`▶ 快捷栏喝药 槽${slotID + 1}`, "ok");
   });
   return quickBar;
+}
+
+// 技能栏(右侧竖排; 见 memory helea-web-skill-system)。GC_SKILL_INFO 下发 skills[] → 显示可用技能图标。
+// 点技能装填 → renderer 记 armedSkill → 点怪释放。Esc 取消装填。CEffectID 递增序列。
+let skillBar = null, skillEffectSeq = 0;
+function ensureSkillBar() {
+  if (skillBar) return skillBar;
+  skillBar = new SkillBar($("game"));
+  skillBar.setArmHandler((skill) => {                                          // 装填/取消 → 渲染器 armedSkill
+    if (renderer) renderer.armSkill(skill);
+    log(skill ? `▶ 装填技能「${skill.n}」, 点怪释放` : "技能已取消", skill ? "ok" : "info");
+  });
+  return skillBar;
 }
 
 // NPC 对话框: 显示服务端直发的 GBK 中文对话(GCNPCSayDynamic)。美术暂用暗金 DOM
@@ -656,6 +673,7 @@ function onGamePacket(p) {
   else if (p.name === "GC_MODIFY_INFORMATION") { // HP/MP/经验/等级/属性 增量: 按 type 分发到状态
     applyMods(p.mods);
   }
+  else if (p.name === "GC_SKILL_INFO") { ensureSkillBar().setSkills(p.skills); log(`◀ GC_SKILL_INFO ${p.race} 技能 ${p.skills.length}(可用 ${p.skills.filter((s) => s.enable).length})`, "ok"); }   // 入世下发技能列表→技能栏
   else if (p.name === "GC_USE_BONUS_POINT_OK") { _pendingBonus = null; }                                   // 加点成功(已乐观, 属性走 GC_MODIFY_INFORMATION)
   else if (p.name === "GC_USE_BONUS_POINT_FAIL") { if (_pendingBonus) { hpmp.bonus++; hpmp[_pendingBonus.attr]--; _pendingBonus = null; updateCharPanel(); log("加点失败", "err"); } }
   // ── 其他玩家可见(三族, 各自精灵包) ──
@@ -898,6 +916,7 @@ window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreatur
   selScreen: () => charSelect, ccScreen: () => charCreate, showCharSelect,                     // 验证用: 选角/建角屏
   qbTest: (gear) => { const q = ensureQuickBar(); q.setGear(gear); return q; },                // 验证用: 喂假腰带 gear 测快捷栏
   applyMods,                                                                                    // 验证用: 测升级检测
+  skillTest: (skills) => ensureSkillBar().setSkills(skills || [5, 6, 7, 8, 9, 154, 155].map((skillType, i) => ({ skillType, enable: true, interval: 2000 + i * 500, castingTime: i % 2 ? 800 : 0 }))),  // 验证用: 喂假技能列表测技能栏
   spawnTest: async () => { const pl = window.__player; if (!pl) return; await addOtherPlayer({ objectID: 99999, race: myRace, sex: mySex, x: pl.col + 1, y: pl.row, dir: 4, name: "测试目标", curHP: 30, maxHP: 50 }); } };  // 验证用: 注入带血条/名字的目标
 // 渲染服务端角色列表: 每个角色一个按钮(可选), 有空槽再给「创建新角色」入口。
 function renderPCList(p) {

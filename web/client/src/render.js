@@ -349,6 +349,10 @@ void main(){
   setOtherHP(objectID, hp, maxHP) { const e = this._others.get(objectID); if (e) { e.hp = hp; if (maxHP != null) e.maxHP = maxHP; } }
   // 点击怪物→攻击的回调(index.html 设为发 CG_ATTACK)。
   setNetAttack(fn) { this._netAttack = fn; return this; }
+  // 点怪释放技能回调(index.html 设为发 CG_SKILL_TO_OBJECT)。(targetID, skill)。
+  setNetSkill(fn) { this._netSkill = fn; return this; }
+  // 装填/取消技能(技能栏点选): 装填后点怪即释放该技能而非近战。
+  armSkill(skill) { this._armedSkill = skill || null; }
   // 点击地面物品→拾取的回调(index.html 设为发 CGAddZoneToInventory)。
   setNetPickup(fn) { this._netPickup = fn; return this; }
   // 点击 NPC→对话的回调(index.html 设为发 CGNPCTalk)。
@@ -635,6 +639,15 @@ void main(){
           if (e.kind === "monster" && this._netAttack) {
             const pe = this.player;
             if (pe) {
+              if (this._armedSkill && this._netSkill) {                                     // 已装填技能: 点怪释放(冷却门槛同攻击)
+                pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row));
+                const now = performance.now();
+                if (now >= (this._atkCdUntil || 0)) {
+                  this.playAction("attack"); this._netSkill(oid, this._armedSkill);
+                  this._atkCdUntil = now + (this.atkDelayMs || 700);
+                }
+                return;
+              }
               const dist = Math.max(Math.abs(e.col - pe.col), Math.abs(e.row - pe.row));   // 切比雪夫(无朝向限制)
               if (dist <= 1) {                                                              // 相邻: 近战攻击(冷却门槛防 spam)
                 pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row));
