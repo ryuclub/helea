@@ -202,25 +202,43 @@ async function initTerrainForZone(zoneID, fx, fy) {
 // 三族角色资源(按 race+sex 加载对应进阶精灵包 + 重映射动作下标), 带缓存。复刻开源客户端逻辑。
 // race: "slayer"|"vampire"|"ousters"; sex: 0 男 / 1 女。返回 {frames, anim}。
 const _raceAssetCache = new Map(); const _raceInflight = new Map();
-async function buildRaceAssets(race, sex, weaponClass = null) {
+// 装备外观绘制顺序(itemClass → order, 大=后画=更靠前)。身体=0。开源 ADDON 部位叠放近似。
+const ADDON_DRAW_ORDER = { 13: 1, 12: 1, 11: 2, 18: 2, 16: 3, 19: 4, 14: 5, 15: 5, 17: 5, 20: 5, 21: 5, 22: 5, 23: 5, 24: 5, 25: 5 };  // 鞋/裤1 衣/手套2 盾3 盔4 武器5
+// 收集角色多部位 FrameID(身体 + 各装备外观层, 按绘制顺序叠)。gearInfo: [{itemClass,itemType,slotID}]|null。
+// 装备外观帧来自官方 Item.inf 的 AddonMale/FemaleFrameID(iteminfo.js getItemInfo); FrameID 落在 AC 包部位层(0~14)。
+function collectParts(sex, bodyFid, gearInfo) {
+  const parts = [{ frameID: bodyFid, order: 0 }];                       // 身体
+  for (const g of (gearInfo || [])) {
+    const info = getItemInfo(g.itemClass, g.itemType); if (!info) continue;
+    const fid = sex === 0 ? info.addonMale : info.addonFemale;
+    if (fid == null || fid === 65535) continue;                        // 无外观帧
+    parts.push({ frameID: fid, order: ADDON_DRAW_ORDER[g.itemClass] ?? 3 });
+  }
+  return parts.sort((a, b) => a.order - b.order);
+}
+async function buildRaceAssets(race, sex, gearInfo = null) {
   const pack = (RACE_SPRITE_PACK[race] || RACE_SPRITE_PACK.slayer)[sex] ?? (RACE_SPRITE_PACK[race] || RACE_SPRITE_PACK.slayer)[0];
-  const key = pack + ":" + (weaponClass ?? "");   // 武器变化→不同动作集(slayer攻击随武器)→分缓存
+  const weaponClass = (() => { const w = (gearInfo || []).find((g) => g.slotID === 4); return w ? w.itemClass : null; })();  // 右手武器→攻击动作
+  const gkey = (gearInfo || []).map((g) => g.itemClass + "-" + g.itemType).join(",");
+  const key = pack + ":" + gkey;   // 装备变化→不同部位/动作集→分缓存
   if (_raceAssetCache.has(key)) return _raceAssetCache.get(key);
   if (_raceInflight.has(key)) return _raceInflight.get(key);   // ★进行中: 复用Promise, 避免换区涌入同族玩家时重复解码
   const p = (async () => {
-    const acts = raceActions(race, weaponClass);   // {stand,move,attack,die} = cfpk 动作下标(slayer按右手武器分流)
-    const fid = raceFrameID(race);    // cfpk 第一维(身体所在 FrameID/coat): slayer/vampire 0, ousters 1
+    const acts = raceActions(race, weaponClass);   // slayer攻击随右手武器分流
+    const bodyFid = raceFrameID(race);    // 身体所在 FrameID: slayer/vampire 0, ousters 1
     const cfpk = parseCFPK(await fetchBuf(`/public/assets/${pack}.cfpk`));
-    const anim = { stand: getActionSeqs(cfpk, fid, acts.stand), move: getActionSeqs(cfpk, fid, acts.move),
-      attack: getActionSeqs(cfpk, fid, acts.attack), die: getActionSeqs(cfpk, fid, acts.die) };
+    const partDefs = collectParts(sex, bodyFid, gearInfo);             // 身体 + 装备多部位
+    const parts = partDefs.map((pf) => ({ order: pf.order,
+      anim: { stand: getActionSeqs(cfpk, pf.frameID, acts.stand), move: getActionSeqs(cfpk, pf.frameID, acts.move),
+        attack: getActionSeqs(cfpk, pf.frameID, acts.attack), die: getActionSeqs(cfpk, pf.frameID, acts.die) } }));
     const ids = new Set();
-    for (const seqs of [anim.stand, anim.move, anim.attack, anim.die]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
+    for (const part of parts) for (const k of ["stand", "move", "attack", "die"]) { const seqs = part.anim[k]; if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s); }
     const frames = await loadSpritesById(`/public/assets/${pack}.ispk`, 64, [...ids]);
-    // 校验: 站立帧必须有有效精灵, 否则视为加载不完整 → 抛错(绝不缓存坏资源, 否则永久不可见)。
-    const ok = anim.stand && anim.stand.some((dir) => dir.some((fr) => frames[fr.s]));
+    const body = parts[0].anim;   // 身体 anim(供现有 e.anim/_h/血条逻辑)
+    const ok = body.stand && body.stand.some((dir) => dir.some((fr) => frames[fr.s]));
     if (!ok) throw new Error(`角色精灵不完整: ${pack}`);
-    log(`角色资源就绪: ${pack} (${ids.size} 精灵, stand${acts.stand}/move${acts.move})`, "info");
-    return { frames, anim };
+    log(`角色资源就绪: ${pack} (${parts.length}部位 ${ids.size}精灵)`, "info");
+    return { frames, anim: body, parts };   // parts: 多部位(身体+装备), 渲染叠加
   })();
   _raceInflight.set(key, p);
   try { const out = await p; _raceAssetCache.set(key, out); return out; }
@@ -231,8 +249,6 @@ let player = null, gws = null, placing = false, pendingPlace = null;
 // 服务器告知真实坐标(入世/换区/传送落点): 加载该 zone 地图 → 首次生成角色/之后重定位。
 // ⚠ 换区是异步(地形要 fetch+建块), 而快速连续换区(地牢逐层进出)会连发多个 GC_UPDATE_INFO/SET_POSITION。
 // 旧实现 `if(placing)return` 会**丢弃**后续换区 → 角色没放到新图、新旧地块混杂。改为"最新目标胜出":
-// 右手武器(WearPart RIGHTHAND=slotID 4)的 itemClass → slayer 攻击/站立/移动动作随武器变化。无武器(拳)→null 回退默认。
-function myWeaponClass() { const w = (gearItems || []).find((g) => g.slotID === 4); return w ? w.itemClass : null; }
 // 加载中再来请求只记下最新目标, 当前加载完接着处理它; 加载途中目标又变则跳过本次定位、重载最新。
 async function placePlayerAt(x, y) {
   pendingPlace = { x, y, zone: curZone || (RACE_START_ZONE[myRace] || 12) };
@@ -244,10 +260,10 @@ async function placePlayerAt(x, y) {
       await initTerrainForZone(t.zone, t.x, t.y);            // 按 zone 加载/换图(同图名早返回, 不同则清旧载新)
       if (pendingPlace) continue;                            // 加载期间又来新换区 → 本次定位作废, 去处理最新
       if (!player) {
-        const { frames, anim } = await buildRaceAssets(myRace, mySex, myWeaponClass());   // slayer 攻击动作随右手武器
+        const { frames, anim, parts } = await buildRaceAssets(myRace, mySex, gearItems);   // 装备多部位合成(身体+武器+护甲...) + 攻击动作随右手武器
         if (pendingPlace) continue;                          // 资源加载期间又换区 → 重来
         SPAWN_COL = t.x; SPAWN_ROW = t.y;
-        player = renderer.spawnSprite(frames, t.x, t.y, anim);
+        player = renderer.spawnSprite(frames, t.x, t.y, anim, parts);
         window.__player = player;
         renderer.setNetMove((dir, cx, cy) => { if (gws && gws.readyState === 1) gws.send(encCGMove({ dir, x: cx, y: cy })); });
         // 普攻: 点怪 → 渲染器回调送 CG_ATTACK(目标ObjectID + 我当前格/朝向, 加密 SHUFFLE_4)。

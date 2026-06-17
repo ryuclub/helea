@@ -298,27 +298,33 @@ void main(){
   // 角色精灵实体。framesById={[spriteID]:{rgba,width,height}}; anim={stand,move}, 每个=dirs[8] of [{s,cx,cy}]
   // (来自 cfpk 帧包: 每帧含精灵ID + 脚底偏移 cX/cY; 序列已含原版"每姿势保持数帧的乒乓"走法)
   // 通用精灵实体构建(主角与其他玩家共用)。不挂相机/指针, 不设 this.player。
-  _makeSpriteEntity(framesById, col, row, anim, name = "spr") {
+  // parts: 多部位[{anim,order}](身体+装备外观层, 同动作时序不同精灵, 叠加渲染); 无 parts 退化单层身体。
+  _makeSpriteEntity(framesById, col, row, anim, name = "spr", parts = null) {
     const B = BABYLON;
-    const textures = {}, frameMeta = {};  // 按 spriteID 索引(稀疏)
+    const textures = {}, frameMeta = {};  // 按 spriteID 索引(稀疏), 各部位共享(同 ispk)
     for (const id in framesById) {
       const f = framesById[id]; if (!f) continue;
       const tx = B.RawTexture.CreateRGBATexture(f.rgba, f.width, f.height, this.scene, false, true, B.Texture.NEAREST_SAMPLINGMODE);
       tx.hasAlpha = true; textures[id] = tx;
       frameMeta[id] = { w: f.width, h: f.height, vtop: _topOpaqueRow(f.rgba, f.width, f.height) };  // vtop=非透明顶行(贴图上 padding), 名字/血条贴视觉头顶用
     }
-    const plane = B.MeshBuilder.CreatePlane(name, { size: 1 }, this.scene); // 单位平面, 逐帧缩放
-    const mat = new B.StandardMaterial(name + "m", this.scene);
-    mat.emissiveColor = new B.Color3(1, 1, 1); mat.disableLighting = true;
-    mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST; mat.specularColor = B.Color3.Black();
-    plane.material = mat;
-    return { plane, mat, textures, frameMeta, anim, col, row, dir: 2,
+    const partList = (parts && parts.length) ? parts : [{ anim, order: 0 }];   // 多部位 or 单层
+    const planes = partList.map((pt, i) => {
+      const plane = B.MeshBuilder.CreatePlane(name + "_" + i, { size: 1 }, this.scene);
+      const mat = new B.StandardMaterial(name + "m" + i, this.scene);
+      mat.emissiveColor = new B.Color3(1, 1, 1); mat.disableLighting = true;
+      mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST; mat.specularColor = B.Color3.Black();
+      plane.material = mat;
+      return { anim: pt.anim, order: pt.order || 0, plane, mat };
+    });
+    return { planes, plane: planes[0].plane, mat: planes[0].mat,   // e.plane=身体(兼容血条/dispose 等现有引用)
+      textures, frameMeta, anim, col, row, dir: 2,
       action: "stand", animIdx: 0, animClock: 0, _lastNow: 0, frameOverride: null, oneShot: null,
       stepping: false, fromCol: col, fromRow: row, toCol: col, toRow: row, t0: 0, stepMs: 320 };
   }
 
-  spawnSprite(framesById, col, row, anim) {
-    const e = this._makeSpriteEntity(framesById, col, row, anim, "hero");
+  spawnSprite(framesById, col, row, anim, parts) {
+    const e = this._makeSpriteEntity(framesById, col, row, anim, "hero", parts);
     this.entities.push(e); this.player = e;
     this.intent = { dc: 0, dr: 0 };   // 键盘移动意图(按住连续走)
     this.path = null;                  // 鼠标寻路路径(格子数组)
@@ -392,7 +398,7 @@ void main(){
   // 他人离开视野 GC_DELETE_OBJECT(232): 释放资源。
   removeOther(objectID) {
     const e = this._others.get(objectID); if (!e) return;
-    try { e.plane.dispose(); e.mat.dispose(); for (const id in e.textures) e.textures[id] && e.textures[id].dispose(); } catch {}
+    try { (e.planes || [{ plane: e.plane, mat: e.mat }]).forEach((p) => { p.plane.dispose(); p.mat.dispose(); }); for (const id in e.textures) e.textures[id] && e.textures[id].dispose(); } catch {}
     this._others.delete(objectID);
   }
   // 每帧驱动其他玩家: 推进动画 + 步进插值 + 绘制(无相机跟随)。
@@ -424,16 +430,28 @@ void main(){
     return seq[idx];
   }
   // 把当前帧画到"全局瓦片左上=(gx,gy)": 应用 cX/cY 偏移 + 按帧缩放 + 脚底(瓦片底)定深度
+  // 多部位渲染: 遍历 e.planes(身体+装备外观层), 每部位同 action/dir/animIdx 取各自精灵叠加。
   _drawFrame(e, gx, gy) {
-    const fr = this._curFrame(e); if (!fr) return;
-    const m = e.frameMeta[fr.s]; if (!m) return;
-    e._h = m.h; e._vtop = m.vtop || 0;                            // 当前精灵高 + 视觉顶 padding(覆盖层血条/名字定位用)
-    const cx = gx + fr.cx + m.w / 2, cy = gy + fr.cy + m.h / 2;   // 贴图中心(全局像素)
-    const w = this._gw(cx, cy);
-    const depthY = gy + TH / 2;                                   // 角色深度=所在行中点(开源扇区画家: 生物半行前置, 赢同行物件、被南行物件遮挡)
-    e.plane.position.set(w.x, w.y, depthZ(depthY));               // 与物件 viewpoint 深度同基准, 无需硬偏置
-    e.plane.scaling.x = m.w; e.plane.scaling.y = m.h;
-    e.mat.diffuseTexture = e.textures[fr.s];
+    const planes = e.planes || [{ anim: e.anim, plane: e.plane, mat: e.mat, order: 0 }];
+    const depthY = gy + TH / 2;                                   // 角色深度=所在行中点(开源扇区画家)
+    for (const part of planes) {
+      const fr = this._curFrameOf(part.anim, e);
+      if (!fr) { part.plane.setEnabled(false); continue; }        // 该部位此动作无帧→隐藏
+      const m = e.frameMeta[fr.s]; if (!m) { part.plane.setEnabled(false); continue; }
+      part.plane.setEnabled(true);
+      if (part.order === 0) { e._h = m.h; e._vtop = m.vtop || 0; }  // 身体定血条/名字高度
+      const cx = gx + fr.cx + m.w / 2, cy = gy + fr.cy + m.h / 2;   // 贴图中心(全局像素), 各部位各自锚点
+      const w = this._gw(cx, cy);
+      part.plane.position.set(w.x, w.y, depthZ(depthY) - part.order * 0.0008);  // 装备层在身体前(order大更前)
+      part.plane.scaling.x = m.w; part.plane.scaling.y = m.h;
+      part.mat.diffuseTexture = e.textures[fr.s];
+    }
+  }
+  // 用指定部位 anim 取当前帧(多部位共享 e.action/dir/animIdx/frameOverride)。
+  _curFrameOf(anim, e) {
+    const seq = anim && anim[e.action] && anim[e.action][e.dir]; if (!seq || !seq.length) return null;
+    const idx = (e.frameOverride != null) ? Math.min(e.frameOverride, seq.length - 1) : (e.animIdx % seq.length);
+    return seq[idx];
   }
   _renderAt(e, col, row) { const tl = this._tileGTL(col, row); this._drawFrame(e, tl.x, tl.y); }
   _centerTile(col, row) { this._camTo(col * TW + TW / 2, row * TH + TH / 2); }
