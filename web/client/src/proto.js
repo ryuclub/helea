@@ -102,6 +102,10 @@ export const PACKET = {
   CG_USE_BONUS_POINT: 134,
   GC_USE_BONUS_POINT_OK: 412,
   GC_USE_BONUS_POINT_FAIL: 411,
+  // 技能(P1): 对怪 CG_SKILL_TO_OBJECT(106) SkillType u16+CEffectID u16+TargetObjID u32 (SHUFFLE_3)
+  CG_SKILL_TO_OBJECT: 106,
+  GC_SKILL_INFO: 361,                  // 入世下发角色技能列表: PCType u8+技能数 u8+每PCSkillInfo
+  GC_SKILL_TO_OBJECT_OK_1: 364,        // 命中: SkillType+CEffectID+Target+Duration+Grade+ModifyInfo(施法者属性)
 };
 export const NAME = Object.fromEntries(Object.entries(PACKET).map(([k, v]) => [v, k]));
 
@@ -331,6 +335,20 @@ export function encCGUsePotionFromQuickSlot({ objectID, slotID }) {
 // 加属性点 CG_USE_BONUS_POINT(134, 明文): which=INC_INT(0)/INC_STR(1)/INC_DEX(2)。回 GC_USE_BONUS_POINT_OK/FAIL, 属性走 GC_MODIFY_INFORMATION。
 export function encCGUseBonusPoint({ which }) {
   return gframe(PACKET.CG_USE_BONUS_POINT, new Writer().u8(which & 0xff).build());
+}
+// 技能对怪 CG_SKILL_TO_OBJECT(106): SHUFFLE_3(A=SkillType u16, B=CEffectID u16, C=TargetObjID u32)。
+// CEffectID=客户端效果实例ID(递增, 服务端回包带回用于关联效果动画)。多字节按宽度 ^code 仅低字节。
+let _ceffectSeq = 1;
+export function encCGSkillToObject({ skillType, targetID, effectID }) {
+  const eid = effectID != null ? effectID : (_ceffectSeq = (_ceffectSeq + 1) & 0xffff);
+  const w = new Writer(), c = _code;
+  if (c === 0) { w.u16(skillType).u16(eid).u32(targetID >>> 0); }
+  else {
+    const A = () => w.u16(skillType ^ c), B = () => w.u16(eid ^ c), C = () => w.u32((targetID ^ c) >>> 0);
+    const m = c % 3;
+    if (m === 0) { A(); B(); C(); } else if (m === 1) { B(); C(); A(); } else { C(); A(); B(); }
+  }
+  return gframe(PACKET.CG_SKILL_TO_OBJECT, w.build());
 }
 // 背包格→光标 CGAddInventoryToMouse(4) / 光标→背包格 CGAddMouseToInventory(8)。★服务端明文读, 永远明文发。
 export function encCGAddInventoryToMouse({ objectID, invenX, invenY }) {
