@@ -450,12 +450,17 @@ function showLevelUp(level) {
 //   开源链路: skillType → g_pActionInfoTable[skillType].GetEffectStatus() → EFFECTSTATUS → loadEffectByStatus。
 //   SKILL_EFFECT_STATUS 映射待从 ActionInfo.inf(MActionInfo.m_EffectStatus, WORD) 抽取(怪区联调时补全+目视)。
 //   映射就绪后此处即点亮命中特效; 怪物 HP/伤害飘字已走各自 HP 更新包(setCreatureHP)。
-const SKILL_EFFECT_STATUS = {};   // { [skillType]: EFFECTSTATUS } —— 待 ActionInfo.inf 抽取填充
+let SKILL_EFFECT_STATUS = null;   // { [skillType]: EFFECTSTATUS }(Action.inf 抽取, tools/extract-skilleffect.mjs)
+async function ensureSkillEffectMap() {
+  if (SKILL_EFFECT_STATUS) return SKILL_EFFECT_STATUS;
+  try { SKILL_EFFECT_STATUS = await fetch("/public/assets/skilleffect.json").then((r) => r.ok ? r.json() : {}); } catch { SKILL_EFFECT_STATUS = {}; }
+  return SKILL_EFFECT_STATUS;
+}
 function onSkillHit(targetID, skillType, effectID) {
   if (!renderer || !renderer._others) return;
   const e = renderer._others.get(targetID); if (!e) return;
-  const status = SKILL_EFFECT_STATUS[skillType];
-  if (status == null) return;     // 无映射(多数基础技能仅伤害无特效)→不播
+  const status = SKILL_EFFECT_STATUS && SKILL_EFFECT_STATUS[skillType];
+  if (status == null) return;     // 无映射(多数基础技能仅伤害无特效)→不播; 有则播状态特效(部分 status 无精灵, loadEffectByStatus 返回 null 安全)
   loadEffectByStatus(status).then((eff) => { if (eff) renderer.playCreatureEffect(e, eff); }).catch(() => {});
 }
 
@@ -587,6 +592,7 @@ let skillBar = null, skillEffectSeq = 0;
 function ensureSkillBar() {
   if (skillBar) return skillBar;
   skillBar = new SkillBar($("game")); window.__skillbar = skillBar;
+  ensureSkillEffectMap();                                                     // 预载 skillType→EFFECTSTATUS(命中特效用)
   skillBar.setArmHandler((skill) => {                                          // 装填/取消 → 渲染器 armedSkill
     if (renderer) renderer.armSkill(skill);
     log(skill ? `▶ 装填技能「${skill.n}」, 点怪释放` : "技能已取消", skill ? "ok" : "info");
