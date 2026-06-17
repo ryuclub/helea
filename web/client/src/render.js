@@ -14,7 +14,7 @@ const DEPTH_GROUND = 1;       // 地面恒在所有物件之后
 const depthZ = (baseY) => -baseY * DEPTH_EPS;
 // 精灵主体顶行 y(贴图上方 padding + 跳过武器/头发稀疏尖端): 名字/血条贴"视觉主体头顶"而非贴图几何顶或尖端。
 function _topOpaqueRow(rgba, w, h) {
-  const minPix = Math.max(2, w * 0.12 | 0);   // 某行非透明像素 ≥ 宽度12% 才算主体(跳过尖端单像素)
+  const minPix = Math.max(2, w * 0.3 | 0);   // 某行非透明像素 ≥ 宽度30% 才算"头部主体"(跳过头发/帽/武器尖端, 名字贴头部)
   for (let y = 0; y < h; y++) { const base = y * w * 4; let c = 0; for (let x = 0; x < w; x++) if (rgba[base + x * 4 + 3] > 8) c++; if (c >= minPix) return y; }
   return 0;
 }

@@ -36,13 +36,33 @@ export const RACE_SPRITE_PACK = {
   ousters: { 0: "acousters",     1: "acousters" }, // ousters 无性别分包(单一)
 };
 
+// ★Slayer 站立/移动/攻击动作随「右手武器类型」变化(开源 ConvAdvancementSlayerActionFromSlayerAction 按武器分流)。
+// 下标 = ADVANCEMENT_SLAYER 枚举-100(MTypeDef.h:272+): STOP_xxx / MOVE_xxx / ATTACK_xxx_NORMAL。
+//   SWORD: STOP=100→0 MOVE=104→4 ATTACK_NORMAL=109→9; BLADE: 101→1/105→5/112→12;
+//   GUN(AR): 102→2/106→6/ATTACK_AR_NORMAL=115→15; MACE_AND_CROSS: 103→3/107→7/(无专属攻击, 借 SWORD_SLOW 108→8)。
+//   die 各武器统一 DIE(136→36)。
+const SLAYER_WEAPON_ACTIONS = {
+  sword: { stand: 0, move: 4, attack: 9,  die: 36 },
+  blade: { stand: 1, move: 5, attack: 12, die: 36 },
+  gun:   { stand: 2, move: 6, attack: 15, die: 36 },
+  mace:  { stand: 3, move: 7, attack: 8,  die: 36 },   // 默认(mace/cross/拳)
+};
+// 右手武器 itemClass → 武器动作类型键(ITEM_CLASS: SWORD=14/BLADE=15/GUN=20~/其余默认 mace)。
+export function slayerWeaponType(itemClass) {
+  if (itemClass === 14) return "sword";
+  if (itemClass === 15) return "blade";
+  if (itemClass >= 20 && itemClass <= 25) return "gun";   // 各类枪
+  return "mace";
+}
+
 // 取某族某基础动作的 cfpk 下标。未知族回退 slayer。
 export function actionIndex(race, actionName) {
   const t = RACE_ACTION_INDEX[race] || RACE_ACTION_INDEX.slayer;
   return t[actionName] ?? t.stand;
 }
 
-// 该族绘制需要的全部动作下标集合(供 cfpk 取序列)。
-export function raceActions(race) {
+// 该族绘制需要的全部动作下标集合(供 cfpk 取序列)。slayer 传 weaponClass(右手武器itemClass)按武器选动作。
+export function raceActions(race, weaponClass) {
+  if (race === "slayer" && weaponClass != null) return SLAYER_WEAPON_ACTIONS[slayerWeaponType(weaponClass)] || SLAYER_WEAPON_ACTIONS.mace;
   return RACE_ACTION_INDEX[race] || RACE_ACTION_INDEX.slayer;
 }

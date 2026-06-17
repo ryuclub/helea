@@ -202,13 +202,13 @@ async function initTerrainForZone(zoneID, fx, fy) {
 // 三族角色资源(按 race+sex 加载对应进阶精灵包 + 重映射动作下标), 带缓存。复刻开源客户端逻辑。
 // race: "slayer"|"vampire"|"ousters"; sex: 0 男 / 1 女。返回 {frames, anim}。
 const _raceAssetCache = new Map(); const _raceInflight = new Map();
-async function buildRaceAssets(race, sex) {
+async function buildRaceAssets(race, sex, weaponClass = null) {
   const pack = (RACE_SPRITE_PACK[race] || RACE_SPRITE_PACK.slayer)[sex] ?? (RACE_SPRITE_PACK[race] || RACE_SPRITE_PACK.slayer)[0];
-  const key = pack;
+  const key = pack + ":" + (weaponClass ?? "");   // 武器变化→不同动作集(slayer攻击随武器)→分缓存
   if (_raceAssetCache.has(key)) return _raceAssetCache.get(key);
   if (_raceInflight.has(key)) return _raceInflight.get(key);   // ★进行中: 复用Promise, 避免换区涌入同族玩家时重复解码
   const p = (async () => {
-    const acts = raceActions(race);   // {stand,move,attack,die} = cfpk 动作下标(开源 AC 重映射)
+    const acts = raceActions(race, weaponClass);   // {stand,move,attack,die} = cfpk 动作下标(slayer按右手武器分流)
     const fid = raceFrameID(race);    // cfpk 第一维(身体所在 FrameID/coat): slayer/vampire 0, ousters 1
     const cfpk = parseCFPK(await fetchBuf(`/public/assets/${pack}.cfpk`));
     const anim = { stand: getActionSeqs(cfpk, fid, acts.stand), move: getActionSeqs(cfpk, fid, acts.move),
@@ -231,6 +231,8 @@ let player = null, gws = null, placing = false, pendingPlace = null;
 // 服务器告知真实坐标(入世/换区/传送落点): 加载该 zone 地图 → 首次生成角色/之后重定位。
 // ⚠ 换区是异步(地形要 fetch+建块), 而快速连续换区(地牢逐层进出)会连发多个 GC_UPDATE_INFO/SET_POSITION。
 // 旧实现 `if(placing)return` 会**丢弃**后续换区 → 角色没放到新图、新旧地块混杂。改为"最新目标胜出":
+// 右手武器(WearPart RIGHTHAND=slotID 4)的 itemClass → slayer 攻击/站立/移动动作随武器变化。无武器(拳)→null 回退默认。
+function myWeaponClass() { const w = (gearItems || []).find((g) => g.slotID === 4); return w ? w.itemClass : null; }
 // 加载中再来请求只记下最新目标, 当前加载完接着处理它; 加载途中目标又变则跳过本次定位、重载最新。
 async function placePlayerAt(x, y) {
   pendingPlace = { x, y, zone: curZone || (RACE_START_ZONE[myRace] || 12) };
@@ -242,7 +244,7 @@ async function placePlayerAt(x, y) {
       await initTerrainForZone(t.zone, t.x, t.y);            // 按 zone 加载/换图(同图名早返回, 不同则清旧载新)
       if (pendingPlace) continue;                            // 加载期间又来新换区 → 本次定位作废, 去处理最新
       if (!player) {
-        const { frames, anim } = await buildRaceAssets(myRace, mySex);
+        const { frames, anim } = await buildRaceAssets(myRace, mySex, myWeaponClass());   // slayer 攻击动作随右手武器
         if (pendingPlace) continue;                          // 资源加载期间又换区 → 重来
         SPAWN_COL = t.x; SPAWN_ROW = t.y;
         player = renderer.spawnSprite(frames, t.x, t.y, anim);
