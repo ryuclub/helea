@@ -5,9 +5,8 @@
 // 布局常量取自 research/client VS_UI_Game{Common,Slayer,Vampire,Ousters}.cpp(硬编码)。
 // 背包 10×6, 格 30×30 无间距; 装备槽 rect 三族各异。
 //
-// 物品图标 frameID 来自原版 Item.inf(ItemClass+ItemType→FrameID), 该表锁在 dklegend.dpk(未解包):
-//   按降序"①用资源"渲染窗口/格子/空槽; 物品图标缺索引表 → 尽力而为(试 itemType 当帧号),
-//   失败则占位(色块 + 类型号 + 数量), 逻辑完整可见, 待 dpk 解包后换真图标。
+// 物品图标 frameID 来自官方 Item.inf(ItemClass+ItemType→InventoryFrameID, iteminfo.js 解析):
+//   ①用资源渲染窗口/格子/空槽 + 真图标; 个别缺帧才占位(色块 + 类型号 + 数量)。
 
 import { loadUIPack, loadItemPack } from "./uispk.js";
 import { loadItemInf, getItemInfo } from "./iteminfo.js";

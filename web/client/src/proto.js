@@ -79,7 +79,7 @@ export const PACKET = {
   GC_NPC_RESPONSE: 296,           // NPC响应: Code u16(+Param u32, 按包长判断); Code=10 QUIT关对话, 其余多为开界面
   GC_NPC_ASK: 292,                // NPC脚本菜单(scriptID, 文本在客户端 NPCScript.inf 韩文原版)
   GC_NPC_ASK_DYNAMIC: 293,        // ★NPC动态菜单: 服务端直发中文 subject+contents选项(不需客户端表)
-  GC_NPC_SAY: 297,                // NPC静态文本(ScriptID, 文本锁dpk)
+  GC_NPC_SAY: 297,                // NPC静态文本(ScriptID→官方 NPCScript.inf 文本)
   // ── 商店(全部明文) ──
   CG_SHOP_REQUEST_LIST: 101,      // 请求商品列表: ObjID u32+RackType u8
   CG_SHOP_REQUEST_BUY: 100,       // 购买: ObjID+RackType+RackIndex+Num+X+Y (全 u8 + ObjID u32)
@@ -713,7 +713,7 @@ export function decode(u8) {
     }
     // NPC 响应码: Code u16 (+Parameter u32, 按包长判断——某些 Code 才带)。Code=10 关对话框。
     else if (id === PACKET.GC_NPC_RESPONSE) { out.code = r.u16(); if (size >= 6) out.parameter = r.u32(); }
-    // NPC 脚本菜单/静态文本: 文本按 ScriptID 查客户端 NPCScript.inf(锁 dpk) → 仅解析结构, 文本暂缺。
+    // NPC 脚本菜单/静态文本: 文本按 ScriptID 查官方 NPCScript.inf → 仅解析结构, 文本接入待做。
     else if (id === PACKET.GC_NPC_ASK) { out.objectID = r.u32(); out.scriptID = r.u32(); out.npcID = r.u16(); }
     else if (id === PACKET.GC_NPC_ASK_DYNAMIC) {                                                          // 中文动态菜单(GCNPCAskDynamic): ObjID+ScriptID+Subject(u16len+str)+ContentsCount+Contents[u16len+str]
       out.objectID = r.u32(); out.scriptID = r.u32();

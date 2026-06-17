@@ -346,8 +346,8 @@ void main(){
   setNetPickup(fn) { this._netPickup = fn; return this; }
   // 点击 NPC→对话的回调(index.html 设为发 CGNPCTalk)。
   setNetNPCTalk(fn) { this._netNPCTalk = fn; return this; }
-  // 地面掉落物(GCAddNewItemToZone): 在格子建一个可点击 plane。sprite={rgba,width,height}(item.ispk 尽力而为)
-  //   则用真图标; 缺省发光黄块(地面图标 frameID 锁 dpk, 按降序降级为 3D 标记)。
+  // 地面掉落物(GCAddNewItemToZone): 在格子建一个可点击 plane。sprite={rgba,width,height}(官方 Item.inf 图标)
+  //   则用真图标; 缺省发光黄块(降级为 3D 标记)。
   addGroundItem(objectID, col, row, sprite) {
     const B = BABYLON;
     if (this._groundItems.has(objectID)) this.removeGroundItem(objectID);

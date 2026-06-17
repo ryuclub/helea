@@ -545,7 +545,7 @@ function showNPCDialog(name, message) {
 }
 function hideNPCDialog() { if (npcDialog) npcDialog.style.display = "none"; }
 
-// 商店(M3b): 点商店NPC→GCNPCAsk(脚本菜单, 文本锁dpk)→降级弹"购买/离开"按钮→CGShopRequestList→GCShopList→商店窗。
+// 商店(M3b): 点商店NPC→GCNPCAsk(脚本菜单, 文本在官方 NPCScript.inf)→弹"购买/离开"按钮→CGShopRequestList→GCShopList→商店窗。
 // 购买: 点商品发 CGShopRequestBuy(找空背包格); 出售: 商店开启时点背包物发 CGShopRequestSell。
 let shopUI = null, shopSellMode = false;
 function ensureShopUI() {
@@ -580,7 +580,7 @@ function showNPCAsk(objectID, name, subject, contents) {
 function showNPCMenu(objectID, name) {
   const d = ensureNPCDialog();
   d.innerHTML = `<div style="font-size:15px;color:#ffd87a;border-bottom:1px solid #8a6a3a;margin-bottom:8px;padding-bottom:5px">${(name || "NPC").replace(/</g, "&lt;")}</div>`
-    + `<div style="margin-bottom:8px;color:#9a8;font-size:12px">(脚本对话文本锁 dpk, 暂提供商店入口)</div>`
+    + `<div style="margin-bottom:8px;color:#9a8;font-size:12px">(脚本对话文本待接 NPCScript.inf, 暂提供商店入口)</div>`
     + `<div style="display:flex;gap:10px;justify-content:flex-end">`
     + `<span id="npcBuy" style="cursor:pointer;color:#ffd87a;border:1px solid #8a6a3a;border-radius:4px;padding:2px 14px">购买</span>`
     + `<span id="npcClose2" style="cursor:pointer;color:#e8d8b0;border:1px solid #6a5a3a;border-radius:4px;padding:2px 14px">离开</span></div>`;
@@ -660,7 +660,7 @@ function onGamePacket(p) {
   }
   else if (p.name === "GC_ADD_NEW_ITEM_TO_ZONE" || p.name === "GC_ADD_ITEM_TO_ZONE") {                     // 地面掉落物(新掉/入世已有)
     groundItems[p.objectID] = { x: p.x, y: p.y, itemType: p.itemType };
-    const s = (invUI && invUI.itemPack) ? invUI.itemPack.get(p.itemType) : null;                          // item.ispk 尽力而为图标, 缺则黄块
+    const s = (invUI && invUI.itemPack) ? invUI.itemPack.get(p.itemType) : null;                          // 地面图标(官方 Item.inf), 缺则黄块
     renderer.addGroundItem(p.objectID, p.x, p.y, s);
   }
   else if (p.name === "GC_DELETE_AND_PICKUP_OK") { renderer.removeGroundItem(p.objectID); delete groundItems[p.objectID]; } // 拾取成功: 移除地面物
@@ -674,7 +674,7 @@ function onGamePacket(p) {
   }
   else if (p.name === "GC_NPC_ASK") { const e = renderer._others.get(p.objectID); showNPCMenu(p.objectID, e ? e.name : "NPC"); }   // 292 无文本→降级商店入口
   else if (p.name === "GC_NPC_ASK_DYNAMIC") { const e = renderer._others.get(p.objectID); showNPCAsk(p.objectID, e ? e.name : "NPC", p.subject, p.contents); }   // 293 服务端中文菜单
-  else if (p.name === "GC_NPC_SAY") { log(`◀ GC_NPC_SAY scriptID=${p.scriptID}(脚本文本锁dpk)`, "info"); }
+  else if (p.name === "GC_NPC_SAY") { log(`◀ GC_NPC_SAY scriptID=${p.scriptID}(文本在 NPCScript.inf)`, "info"); }
   // ── 商店 ──
   else if (p.name === "GC_SHOP_LIST") { const s = ensureShopUI(); if (invUI && invUI.itemPack) s.setItemPack(invUI.itemPack); s.race = myRace; s.open(p.objectID, p); log(`◀ 商店 ${p.items.length} 件商品`, "ok"); }
   else if (p.name === "GC_SHOP_BUY_OK") { log("◀ 购买成功", "ok"); }                                       // 物品入背包走 GCCreateItem, 金钱走 GC_MODIFY

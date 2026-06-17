@@ -6,7 +6,7 @@ import { parseMap, parseImageObjects } from "./src/map.js";
 import { TileSet } from "./src/tile.js";
 import { encodePNG } from "./src/png.js";
 
-const DATA = "/Users/carlos/work/ryuclub/tzly/DarkEden Legend New Version April 2026/Data";
+const DATA = "/Users/carlos/work/ryuclub/tzly/DARKEDEN/Data";   // 官方资源(发行包老版本已清理)
 const mapPath = process.argv[2] || `${DATA}/Map/adam_c.map`;
 const cc = Number(process.argv[3] || 128), cr = Number(process.argv[4] || 128);
 const half = Number(process.argv[5] || 24);
