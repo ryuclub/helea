@@ -75,7 +75,7 @@
 import { GameRenderer } from "../src/render.js";
 import { parseCFPK, getActionSeqs } from "../src/cfpk.js";
 import { loadSpritesById, fetchBuf } from "../src/pack.js";
-import { loadLevelUpEffect } from "../src/effect.js";
+import { loadLevelUpEffect, loadEffectByStatus } from "../src/effect.js";
 import { RACE_SPRITE_PACK, raceActions, raceFrameID } from "../src/creature-anim.js";
 import { initTerrain, buildBlock, buildZoneObjects } from "../src/terrain.js";
 import { LoginScreen } from "../src/ui-login.js";
@@ -446,12 +446,17 @@ function showLevelUp(level) {
   if (player && renderer) loadLevelUpEffect(myRace).then((eff) => { if (eff) renderer.playCreatureEffect(player, eff); }).catch(() => {});
 }
 
-// 技能命中目标 → 在目标身上播命中效果(占位; 效果精灵动画见 task#16)。怪物 HP/伤害飘字走各自 HP 更新包。
+// 技能命中目标 → 在目标身上播命中效果(复用升级特效那套 efpk/aspk: status→effect)。
+//   开源链路: skillType → g_pActionInfoTable[skillType].GetEffectStatus() → EFFECTSTATUS → loadEffectByStatus。
+//   SKILL_EFFECT_STATUS 映射待从 ActionInfo.inf(MActionInfo.m_EffectStatus, WORD) 抽取(怪区联调时补全+目视)。
+//   映射就绪后此处即点亮命中特效; 怪物 HP/伤害飘字已走各自 HP 更新包(setCreatureHP)。
+const SKILL_EFFECT_STATUS = {};   // { [skillType]: EFFECTSTATUS } —— 待 ActionInfo.inf 抽取填充
 function onSkillHit(targetID, skillType, effectID) {
-  if (!renderer) return;
-  const e = renderer._others && renderer._others.get(targetID);
-  if (!e) return;
-  // TODO(task#16): 按 skillType→效果 加载 Effect.efpk 命中动画播在 e 上(复用 playCreatureEffect)。
+  if (!renderer || !renderer._others) return;
+  const e = renderer._others.get(targetID); if (!e) return;
+  const status = SKILL_EFFECT_STATUS[skillType];
+  if (status == null) return;     // 无映射(多数基础技能仅伤害无特效)→不播
+  loadEffectByStatus(status).then((eff) => { if (eff) renderer.playCreatureEffect(e, eff); }).catch(() => {});
 }
 
 // 角色信息面板(C 键开关)。数据忠实来自服务端; 美术暂用 DOM(infoXXX.spk 完整面板留后续)。

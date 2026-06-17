@@ -51,12 +51,14 @@ async function frameIDOf(type) {
   return 65535;
 }
 
-// 升级特效帧数据: {frames(s→{rgba,width,height}), anim(dir→[{s,cx,cy,back}])}。无则 null(回退 DOM 提示)。
-export async function loadLevelUpEffect(race) {
-  if (race in _cache) return _cache[race];
+// 任意 EFFECTSTATUS → 特效帧数据: {frames(s→{rgba,width,height}), anim(dir→[{s,cx,cy,back}])}。无则 null。
+// 通用链路(升级/中毒/护盾/技能命中等共用): status → EffectStatus.inf → EffectSpriteType → FrameID → Effect.efpk → aspk。
+const _statusCache = {};
+export async function loadEffectByStatus(status) {
+  if (status in _statusCache) return _statusCache[status];
   let out = null;
   try {
-    const type = await effectSpriteTypeOf(LEVELUP_STATUS[race] ?? 127);
+    const type = await effectSpriteTypeOf(status);
     if (type !== 65535) {
       const fid = await frameIDOf(type);
       if (fid !== 65535) {
@@ -70,6 +72,14 @@ export async function loadLevelUpEffect(race) {
       }
     }
   } catch { out = null; }
+  _statusCache[status] = out;
+  return out;
+}
+
+// 升级特效(按种族选 EFFECTSTATUS_LEVELUP_xxx)。薄封装 loadEffectByStatus。
+export async function loadLevelUpEffect(race) {
+  if (race in _cache) return _cache[race];
+  const out = await loadEffectByStatus(LEVELUP_STATUS[race] ?? 127);
   _cache[race] = out;
   return out;
 }
