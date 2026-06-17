@@ -341,9 +341,24 @@ void main(){
     let e = this._others.get(objectID);
     if (e) { e.col = col; e.row = row; e.dir = dir; e.stepping = false; if (info) Object.assign(e, info); this._renderAt(e, col, row); return e; }
     e = this._makeSpriteEntity(framesById, col, row, anim, "oth" + objectID);
-    e.dir = dir; if (info) Object.assign(e, info);   // {name, hp, maxHP, kind}
+    e.dir = dir; e.objectID = objectID; if (info) Object.assign(e, info);   // {name, hp, maxHP, kind}
     this._others.set(objectID, e); this._renderAt(e, col, row);
     return e;
+  }
+  // 死亡: 播 die 动画(定格末帧)→短暂停留作"尸体"→移除。无 die 动作的怪直接移除。
+  killOther(objectID) {
+    const e = this._others.get(objectID); if (!e || e.dying) return;
+    const die = e.anim && e.anim.die;
+    if (!die || !die.some((d) => d && d.length)) { this.removeOther(objectID); return; }
+    e.dying = true; e.dieT0 = performance.now(); e.stepping = false; e.maxHP = 0;  // maxHP=0→不再画血条
+  }
+  _updateDying(e, now) {
+    const t = now - e.dieT0;
+    e.action = "die";
+    const seq = e.anim.die[e.dir] || e.anim.die[2] || e.anim.die.find((d) => d && d.length);
+    if (seq && seq.length) e.frameOverride = Math.min(Math.floor(t / 70), seq.length - 1);  // ~14fps 播一遍后定格
+    this._renderAt(e, e.col, e.row);
+    if (t > 1600) this.removeOther(e.objectID);                                  // 尸体停留 ~1.6s 后移除
   }
   // 更新某生物的 HP(战斗/受击) → 血条即时反映。
   setOtherHP(objectID, hp, maxHP) { const e = this._others.get(objectID); if (e) { e.hp = hp; if (maxHP != null) e.maxHP = maxHP; } }
@@ -387,10 +402,11 @@ void main(){
   // 某生物 HP 更新到绝对值(服务端 GC_STATUS_CURRENT_HP 广播被击者新HP)。
   // 据旧HP-新HP 算伤害飘字; HP 到 0 等服务端删/尸体包再移除。
   setCreatureHP(objectID, newHP) {
-    const e = this._others.get(objectID); if (!e) return;
+    const e = this._others.get(objectID); if (!e || e.dying) return;
     const dmg = Math.max(0, (e.hp ?? newHP) - newHP);
     e.hp = newHP;
     if (dmg > 0) this.floatText(e, "-" + dmg, "#f55");
+    if (newHP <= 0) this.killOther(objectID);              // HP 归零 → 死亡动画(先于尸体包)
   }
   // 在某实体头顶飘一条文字(伤害/治疗/Miss)。entity 可为 player 或 _others 项; 缺省 player。
   floatText(entity, text, color = "#fff") {
@@ -415,6 +431,7 @@ void main(){
   // 每帧驱动其他玩家: 推进动画 + 步进插值 + 绘制(无相机跟随)。
   _updateOther(e, now, frameMs) {
     if (!e._lastNow) e._lastNow = now;
+    if (e.dying) { this._updateDying(e, now); return; }    // 死亡序列优先
     e.animClock += now - e._lastNow; e._lastNow = now;
     while (e.animClock >= frameMs) { e.animClock -= frameMs; e.animIdx++; }
     if (e._atkUntil && now < e._atkUntil && e.anim.attack) {   // 攻击动画(临时)

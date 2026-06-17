@@ -323,10 +323,11 @@ async function loadCreatureAssets(id, isNPC = false) {
     if (!stand) return null;
     const move = getActionSeqs(_creatureCFPK, frameID, 1) || stand;
     const attack = getActionSeqs(_creatureCFPK, frameID, 2) || null;    // 动作2=攻击(个别怪可能无)
+    const die = getActionSeqs(_creatureCFPK, frameID, 6) || null;       // 动作6=死亡(BASE_ACTION.DIE; 个别怪可能无)
     const ids = new Set();
-    for (const seqs of [stand, move, attack]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
+    for (const seqs of [stand, move, attack, die]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
     const frames = await loadSpritesById("/public/assets/creature.ispk", 64, [...ids]);
-    return { frames, anim: { stand, move, attack } };
+    return { frames, anim: { stand, move, attack, die } };
   })();
   _creatureInflight.set(key, p);
   try { const out = await p; _creatureCache.set(key, out); return out; }  // null 也缓存(避免反复试缺失精灵)
@@ -722,7 +723,7 @@ function onGamePacket(p) {
   else if (p.name === "GC_ADD_SLAYER" || p.name === "GC_ADD_VAMPIRE" || p.name === "GC_ADD_OUSTERS") { addOtherPlayer(p.creature); }
   else if (p.name === "GC_ADD_MONSTER" || p.name === "GC_ADD_NPC") { addCreature(p.creature); }   // 怪物/NPC 进入视野
   else if (p.name === "GC_MOVE") { renderer.otherStep(p.objectID, p.x, p.y, p.dir); }   // 他人移动
-  else if (p.name === "GC_DELETE_OBJECT") { renderer.removeOther(p.objectID); if (groundItems[p.objectID]) { renderer.removeGroundItem(p.objectID); delete groundItems[p.objectID]; } }  // 他人离开/地面物被他人捡走
+  else if (p.name === "GC_DELETE_OBJECT") { const e = renderer._others && renderer._others.get(p.objectID); if (!(e && e.dying)) renderer.removeOther(p.objectID); if (groundItems[p.objectID]) { renderer.removeGroundItem(p.objectID); delete groundItems[p.objectID]; } }  // 离开/被捡走; 正在播死亡动画的不打断(由死亡序列移除)
   // ── 物品/背包/装备(增量) ──
   else if (p.name === "GC_CREATE_ITEM") { invItems.push(p.item); refreshInv(); }                         // 物品入背包格
   else if (p.name === "GC_DELETE_INVENTORY_ITEM") { invItems = invItems.filter((it) => it.objectID !== p.objectID); refreshInv(); } // 删背包格
@@ -771,7 +772,7 @@ function onGamePacket(p) {
   else if (p.name === "GC_ATTACK_MELEE_OK_3") { renderer.otherAttack(p.objectID); }        // 旁观: 攻击者播攻击动画
   // 被击者新HP→血条+伤害飘字。服务端 broadcast 已排除被击者本人, 故只会是视野内的怪/他人(自身HP走 GC_MODIFY_INFORMATION)。
   else if (p.name === "GC_STATUS_CURRENT_HP") { renderer.setCreatureHP(p.objectID, p.curHP); }
-  else if (p.name === "GC_ADD_MONSTER_CORPSE") { renderer.removeOther(p.objectID); }       // 怪死→尸体, 移除活体
+  else if (p.name === "GC_ADD_MONSTER_CORPSE") { renderer.killOther(p.objectID); }          // 怪死→播死亡动画+尸体停留(无die动作的怪直接移除); 掉落走 GC_ADD_ITEM_TO_ZONE
 }
 
 // ───── 注册 / 登录 / 建角色 流程 ─────
