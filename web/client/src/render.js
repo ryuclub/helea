@@ -760,7 +760,12 @@ void main(){
     ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
     for (const e of this._others.values()) {
       if (!e.plane || e.plane.isDisposed() || !e.name) continue;
-      const headY = e.plane.position.y + (e._h || 60) / 2 - (e._vtop || 0) + 4;  // 视觉头顶(扣掉贴图上 padding)上方一点
+      // 忠实开源(MTopViewDraw.cpp:1332): 血条/名字定位 = 脚底 − Creature.inf 的 Height(每生物常量, 见 memory)。
+      // 我们: 脚底世界Y = 贴图底(position.y − _h/2); 头顶世界Y = 脚底 + Height(世界Y向上为正)。缺 Height 时回退贴图视觉顶启发式。
+      const ch = e.creatureHeight;
+      const headY = (ch != null)
+        ? e.plane.position.y - (e._h || 60) / 2 + ch
+        : e.plane.position.y + (e._h || 60) / 2 - (e._vtop || 0) + 4;
       const sp = B.Vector3.Project(new B.Vector3(e.plane.position.x, headY, e.plane.position.z), B.Matrix.Identity(), tm, vpw);
       if (sp.z < 0 || sp.z > 1) continue;                          // 相机后方
       const x = sp.x; let y = sp.y;

@@ -67,8 +67,10 @@ while (p < buf.length) {
   idx++;
 }
 
+// h[] = 按记录序(=CreatureType 索引, GC_ADD_MONSTER 的 MonsterType 直接索引此表; bw[]=HPBarWidth)。
+const h = byIndex.map((r) => r.h), bw = byIndex.map((r) => r.bw);
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
-fs.writeFileSync(OUT, JSON.stringify({ byName }));
+fs.writeFileSync(OUT, JSON.stringify({ byName, h, bw }));
 console.log(`表头项数=${head}, 解析记录 ${idx}, 终点 p=${p}/${buf.length}${p === buf.length ? " (干净到EOF✓)" : " ⚠未到EOF"}, 异常截断=${bad}`);
 console.log("→", OUT);
 for (const nm of ["SlayerMale", "SlayerFemale", "VampireMale1", "Ousters"]) if (byName[nm]) console.log(`  ${nm}: Height=${byName[nm].h} DeadHeight=${byName[nm].dh} HPBarWidth=${byName[nm].bw}`);

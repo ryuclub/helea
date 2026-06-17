@@ -302,8 +302,8 @@ async function placePlayerAt(x, y) {
 async function addOtherPlayer(c) {
   if (!c || c.name === myCharName) return;                   // 跳过自己
   try {
-    const { frames, anim } = await buildRaceAssets(c.race, c.sex || 0);
-    renderer.addOther(c.objectID, frames, c.x, c.y, c.dir, anim, { name: c.name, hp: c.curHP || 0, maxHP: c.maxHP || 0, kind: "player" });
+    const [{ frames, anim }] = await Promise.all([buildRaceAssets(c.race, c.sex || 0), ensureCreatureInfo()]);
+    renderer.addOther(c.objectID, frames, c.x, c.y, c.dir, anim, { name: c.name, hp: c.curHP || 0, maxHP: c.maxHP || 0, kind: "player", creatureHeight: playerHeight(c.race, c.sex || 0) });
     log(`▶ 其他玩家进入视野: ${c.name} #${c.objectID} (${c.race}, ${c.x},${c.y})`, "ok");
   } catch (e) { log("其他玩家资源加载失败: " + e.message, "err"); }
 }
@@ -332,13 +332,25 @@ async function loadCreatureAssets(id, isNPC = false) {
   try { const out = await p; _creatureCache.set(key, out); return out; }  // null 也缓存(避免反复试缺失精灵)
   finally { _creatureInflight.delete(key); }
 }
+// 生物高度表(Creature.inf 抽取): h[creatureType]=头顶血条/名字定位用 Height(忠实开源 GetHeight, 见 memory)。
+// 怪物 c.spriteType 即包里 MonsterType, 直接索引 Creature.inf(开源 SetCreatureType(monsterType))。玩家按种族/性别名查。
+let creatureInfo = null;
+async function ensureCreatureInfo() {
+  if (creatureInfo) return creatureInfo;
+  try { creatureInfo = await fetch("/public/assets/creatureinfo.json").then((r) => r.ok ? r.json() : null); } catch { creatureInfo = null; }
+  return creatureInfo || (creatureInfo = { byName: {}, h: [] });
+}
+const PLAYER_CREATURE_NAME = { slayer: ["SlayerMale", "SlayerFemale"], vampire: ["VampireMale", "VampireFemale"], ousters: ["Ousters", "Ousters"] };
+function playerHeight(race, sex) { const nm = (PLAYER_CREATURE_NAME[race] || [])[sex ? 1 : 0]; const r = creatureInfo && creatureInfo.byName && creatureInfo.byName[nm]; return r ? r.h : 75; }
+
 // 怪物/NPC 进入视野: 复用 addOther 实体管线(移动 GC_MOVE→otherStep, 消失 GC_DELETE_OBJECT→removeOther 已通用)。
 async function addCreature(c) {
   if (!c) return;
   try {
-    const a = await loadCreatureAssets(c.spriteType, c.kind === "npc");
+    const [a] = await Promise.all([loadCreatureAssets(c.spriteType, c.kind === "npc"), ensureCreatureInfo()]);
     if (!a) { log(`生物精灵缺失 type${c.spriteType} (${c.name})`, "err"); return; }
-    renderer.addOther(c.objectID, a.frames, c.x, c.y, c.dir, a.anim, { name: c.name, hp: c.curHP || 0, maxHP: c.maxHP || 0, kind: c.kind });
+    const ch = creatureInfo && creatureInfo.h && creatureInfo.h[c.spriteType];   // Creature.inf[MonsterType].Height
+    renderer.addOther(c.objectID, a.frames, c.x, c.y, c.dir, a.anim, { name: c.name, hp: c.curHP || 0, maxHP: c.maxHP || 0, kind: c.kind, creatureHeight: ch || null });
   } catch (e) { log("生物资源加载失败: " + e.message, "err"); }
 }
 
