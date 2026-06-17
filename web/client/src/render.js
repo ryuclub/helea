@@ -390,9 +390,15 @@ void main(){
     const e = this._others.get(objectID); if (!e) return;
     const dmg = Math.max(0, (e.hp ?? newHP) - newHP);
     e.hp = newHP;
-    if (dmg > 0 && e.plane && !e.plane.isDisposed())
-      this._floaters.push({ x: e.plane.position.x, y: e.plane.position.y + (e._h || 60) / 2, z: e.plane.position.z, text: "-" + dmg, t0: performance.now(), color: "#f55" });
+    if (dmg > 0) this.floatText(e, "-" + dmg, "#f55");
   }
+  // 在某实体头顶飘一条文字(伤害/治疗/Miss)。entity 可为 player 或 _others 项; 缺省 player。
+  floatText(entity, text, color = "#fff") {
+    const e = entity || this.player; if (!e || !e.plane || e.plane.isDisposed()) return;
+    this._floaters.push({ x: e.plane.position.x, y: e.plane.position.y + (e._h || 60) / 2, z: e.plane.position.z, text, t0: performance.now(), color });
+  }
+  // 在玩家自己头顶飘字(被击 -N / 治疗 +N / Miss)。
+  floatOnPlayer(text, color) { this.floatText(this.player, text, color); }
   // 他人移动 GC_MOVE(282): 平滑步进到 (nc,nr), 朝向 dir。
   otherStep(objectID, nc, nr, dir) {
     const e = this._others.get(objectID); if (!e) return;
