@@ -45,6 +45,8 @@ export const PACKET = {
   // CG_ATTACK 加密(SHUFFLE_4)发出; 服务端回 3 种包: OK1(给攻击者确认+自身ModifyInfo), OK3(给旁观者播攻击动画),
   // GC_STATUS_CURRENT_HP(广播被击者新HP→血条/伤害飘字)。怪死再发 GC_ADD_MONSTER_CORPSE。
   CG_ATTACK: 15,                  // 客户端发: 目标ObjectID(u32)+我X(u8)+我Y(u8)+Dir(u8)
+  GC_CREATURE_DIED: 225,          // 角色死亡广播: u8 flag + u32 ObjectID(死者)。自死走 HP≤0 检测, 他死→killOther
+  CG_RESURRECT: 85,               // 复活请求(空体, 明文)。死亡 COMA 5s 后可发, 服务端回 GC_UPDATE_INFO 在复活点重生
   GC_ATTACK_MELEE_OK_1: 208,      // 给攻击者: TargetObjectID(u32)+ModifyInfo(攻击者自身属性变化)
   GC_ATTACK_MELEE_OK_2: 209,      // 给被攻击的玩家(被怪打): 攻击者ObjectID(u32)+ModifyInfo(我方HP变化)
   GC_ATTACK_MELEE_OK_3: 210,      // 给旁观者: 攻击者ObjectID(u32)+TargetObjectID(u32) → 播攻击动画
@@ -187,6 +189,7 @@ export function encCLLogin({ id, password, mac = new Uint8Array(6), loginMode = 
 export function encCLGetPCList() { return frame(PACKET.CL_GET_PC_LIST, new Uint8Array(0)); }
 // 入世就绪(空体)：CGReadyHandler 据此置 GPS_NORMAL, 解锁移动等 in-world 玩法
 export function encCGReady() { return gframe(PACKET.CG_READY, new Uint8Array(0)); }
+export function encCGResurrect() { return gframe(PACKET.CG_RESURRECT, new Uint8Array(0)); }   // 复活请求(空体)
 export function encCLSelectPC({ pcName, pcType = 0 }) {
   // pcName: Uint8Array(原始字节) 或 string
   const name = pcName instanceof Uint8Array ? pcName : Uint8Array.from([...pcName].map((c) => c.charCodeAt(0) & 0xff));
@@ -695,6 +698,7 @@ export function decode(u8) {
     else if (id === PACKET.GC_SKILL_TO_OBJECT_OK_5) { out.objectID = r.u32(); out.targetID = r.u32(); out.skillType = r.u16(); out.duration = r.u16(); out.grade = r.u8(); }
     else if (id === PACKET.GC_SKILL_TO_OBJECT_OK_6) { out.x = r.u8(); out.y = r.u8(); out.skillType = r.u16(); out.duration = r.u16(); out.grade = r.u8(); out.mods = readMods(r); }
     // 技能失败。FAILED_1=给施法者(SkillType+Grade+ModifyInfo), FAILED_2=广播(flag+ObjID+Target+SkillType+Grade)。
+    else if (id === PACKET.GC_CREATURE_DIED) { out.flag = r.u8(); out.objectID = r.u32(); }                          // 角色死亡(死者ObjectID)
     else if (id === PACKET.GC_SKILL_FAILED_1) { out.skillType = r.u16(); out.grade = r.u8(); out.mods = readMods(r); }
     else if (id === PACKET.GC_SKILL_FAILED_2) { out.flag = r.u8(); out.objectID = r.u32(); out.targetID = r.u32(); out.skillType = r.u16(); out.grade = r.u8(); }
     else if (id === PACKET.GC_ADD_MONSTER) { out.creature = readMonster(r); }
