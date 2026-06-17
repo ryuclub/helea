@@ -47,7 +47,7 @@ function chunkPack(spkPath, spkiPath, chunkStart, chunkSize) {
 // 切块结果常驻缓存(运行期资源不变, 切一次即缓存; 同 sendFile 的目的: 杜绝重复 IO/句柄突发)。
 const _chunkCache = new Map();   // 请求路径 -> Buffer
 function serveChunk(res, spkPath, spkiPath, start, size, cacheKey) {
-  const headers = { "Content-Type": "application/octet-stream", "Cache-Control": "no-cache, no-store, must-revalidate" };
+  const headers = { "Content-Type": "application/octet-stream", "Cache-Control": "public, max-age=86400" }; // 切块资源(瓦片/物件)运行期不变→浏览器缓存1天, 换区不重下
   const hit = _chunkCache.get(cacheKey);
   if (hit) { res.writeHead(200, headers); res.end(hit); return; }
   chunkPack(spkPath, spkiPath, start, size)
@@ -125,9 +125,12 @@ const CACHEABLE = new Set([".spk", ".spki", ".ispk", ".ispki", ".cfpk", ".cfpki"
 
 function sendFile(res, file) {
   const ext = path.extname(file);
+  // 游戏二进制资源(官方 Data, 运行期不变)→浏览器缓存 1 天, 换区/重进游戏不再重复下载(换区性能关键);
+  // 代码(html/js/css)→no-cache 开发即改即见。注: 开发期替换了 spk/cfpk/ispk/map 资源 → 浏览器强刷(Cmd+Shift+R)一次拉新。
+  const cacheable = CACHEABLE.has(ext);
   const headers = {
     "Content-Type": MIME[ext] || "application/octet-stream",
-    "Cache-Control": "no-cache, no-store, must-revalidate", // 开发期: 改了即刷即见
+    "Cache-Control": cacheable ? "public, max-age=86400" : "no-cache, no-store, must-revalidate",
   };
   const hit = ASSET_CACHE.get(file);
   if (hit) { res.writeHead(200, headers); res.end(hit); return; }

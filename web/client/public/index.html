@@ -198,26 +198,30 @@ async function initTerrainForZone(zoneID, fx, fy) {
 
 // 三族角色资源(按 race+sex 加载对应进阶精灵包 + 重映射动作下标), 带缓存。复刻开源客户端逻辑。
 // race: "slayer"|"vampire"|"ousters"; sex: 0 男 / 1 女。返回 {frames, anim}。
-const _raceAssetCache = new Map();
+const _raceAssetCache = new Map(); const _raceInflight = new Map();
 async function buildRaceAssets(race, sex) {
   const pack = (RACE_SPRITE_PACK[race] || RACE_SPRITE_PACK.slayer)[sex] ?? (RACE_SPRITE_PACK[race] || RACE_SPRITE_PACK.slayer)[0];
   const key = pack;
   if (_raceAssetCache.has(key)) return _raceAssetCache.get(key);
-  const acts = raceActions(race);   // {stand,move,attack,die} = cfpk 动作下标(开源 AC 重映射)
-  const fid = raceFrameID(race);    // cfpk 第一维(身体所在 FrameID/coat): slayer/vampire 0, ousters 1
-  const cfpk = parseCFPK(await fetchBuf(`/public/assets/${pack}.cfpk`));
-  const anim = { stand: getActionSeqs(cfpk, fid, acts.stand), move: getActionSeqs(cfpk, fid, acts.move),
-    attack: getActionSeqs(cfpk, fid, acts.attack), die: getActionSeqs(cfpk, fid, acts.die) };
-  const ids = new Set();
-  for (const seqs of [anim.stand, anim.move, anim.attack, anim.die]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
-  const frames = await loadSpritesById(`/public/assets/${pack}.ispk`, 64, [...ids]);
-  // 校验: 站立帧必须有有效精灵, 否则视为加载不完整 → 抛错(绝不缓存坏资源, 否则永久不可见)。
-  const ok = anim.stand && anim.stand.some((dir) => dir.some((fr) => frames[fr.s]));
-  if (!ok) throw new Error(`角色精灵不完整: ${pack}`);
-  const out = { frames, anim };
-  _raceAssetCache.set(key, out);
-  log(`角色资源就绪: ${pack} (${ids.size} 精灵, stand${acts.stand}/move${acts.move})`, "info");
-  return out;
+  if (_raceInflight.has(key)) return _raceInflight.get(key);   // ★进行中: 复用Promise, 避免换区涌入同族玩家时重复解码
+  const p = (async () => {
+    const acts = raceActions(race);   // {stand,move,attack,die} = cfpk 动作下标(开源 AC 重映射)
+    const fid = raceFrameID(race);    // cfpk 第一维(身体所在 FrameID/coat): slayer/vampire 0, ousters 1
+    const cfpk = parseCFPK(await fetchBuf(`/public/assets/${pack}.cfpk`));
+    const anim = { stand: getActionSeqs(cfpk, fid, acts.stand), move: getActionSeqs(cfpk, fid, acts.move),
+      attack: getActionSeqs(cfpk, fid, acts.attack), die: getActionSeqs(cfpk, fid, acts.die) };
+    const ids = new Set();
+    for (const seqs of [anim.stand, anim.move, anim.attack, anim.die]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
+    const frames = await loadSpritesById(`/public/assets/${pack}.ispk`, 64, [...ids]);
+    // 校验: 站立帧必须有有效精灵, 否则视为加载不完整 → 抛错(绝不缓存坏资源, 否则永久不可见)。
+    const ok = anim.stand && anim.stand.some((dir) => dir.some((fr) => frames[fr.s]));
+    if (!ok) throw new Error(`角色精灵不完整: ${pack}`);
+    log(`角色资源就绪: ${pack} (${ids.size} 精灵, stand${acts.stand}/move${acts.move})`, "info");
+    return { frames, anim };
+  })();
+  _raceInflight.set(key, p);
+  try { const out = await p; _raceAssetCache.set(key, out); return out; }
+  finally { _raceInflight.delete(key); }
 }
 
 let player = null, gws = null, placing = false, pendingPlace = null;
@@ -281,23 +285,27 @@ async function addOtherPlayer(c) {
 
 // 怪物/NPC 精灵: 忠实链路 MType→SType(DB)→FrameID(CreatureSprite.inf)→Creature.cfpk[FrameID], 见 creature-sprite.js。
 // 之前 spriteType 直接当 FrameID 是错误凑合(MType≠SType, 怪物会显示成别的怪), 现已修正。
-let _creatureCFPK = null; const _creatureCache = new Map();
+let _creatureCFPK = null; const _creatureCache = new Map(); const _creatureInflight = new Map();
 async function loadCreatureAssets(id, isNPC = false) {
   const key = (isNPC ? "n" : "m") + id;                                 // NPC/怪物 spriteType 可能碰撞, 缓存分开
-  if (_creatureCache.has(key)) return _creatureCache.get(key);
-  if (!_creatureCFPK) _creatureCFPK = parseCFPK(await fetchBuf("/public/assets/creature.cfpk"));
-  await Promise.all([loadMonsterMap(), loadCreatureSprite()]);          // 映射表(缓存)
-  const frameID = isNPC ? spriteFrameID(id) : monsterFrameID(id);       // NPC: spriteType→FrameID; 怪物: MType→SType→FrameID
-  const stand = getActionSeqs(_creatureCFPK, frameID, 0);
-  if (!stand) { _creatureCache.set(key, null); return null; }
-  const move = getActionSeqs(_creatureCFPK, frameID, 1) || stand;
-  const attack = getActionSeqs(_creatureCFPK, frameID, 2) || null;      // 动作2=攻击(个别怪可能无)
-  const ids = new Set();
-  for (const seqs of [stand, move, attack]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
-  const frames = await loadSpritesById("/public/assets/creature.ispk", 64, [...ids]);
-  const out = { frames, anim: { stand, move, attack } };
-  _creatureCache.set(key, out);
-  return out;
+  if (_creatureCache.has(key)) return _creatureCache.get(key);          // 已完成
+  if (_creatureInflight.has(key)) return _creatureInflight.get(key);    // ★进行中: 复用同一Promise, 避免换区涌入同类怪时重复fetch+解码(卡顿主因)
+  const p = (async () => {
+    if (!_creatureCFPK) _creatureCFPK = parseCFPK(await fetchBuf("/public/assets/creature.cfpk"));
+    await Promise.all([loadMonsterMap(), loadCreatureSprite()]);        // 映射表(缓存)
+    const frameID = isNPC ? spriteFrameID(id) : monsterFrameID(id);     // NPC: spriteType→FrameID; 怪物: MType→SType→FrameID
+    const stand = getActionSeqs(_creatureCFPK, frameID, 0);
+    if (!stand) return null;
+    const move = getActionSeqs(_creatureCFPK, frameID, 1) || stand;
+    const attack = getActionSeqs(_creatureCFPK, frameID, 2) || null;    // 动作2=攻击(个别怪可能无)
+    const ids = new Set();
+    for (const seqs of [stand, move, attack]) if (seqs) for (const dir of seqs) for (const fr of dir) ids.add(fr.s);
+    const frames = await loadSpritesById("/public/assets/creature.ispk", 64, [...ids]);
+    return { frames, anim: { stand, move, attack } };
+  })();
+  _creatureInflight.set(key, p);
+  try { const out = await p; _creatureCache.set(key, out); return out; }  // null 也缓存(避免反复试缺失精灵)
+  finally { _creatureInflight.delete(key); }
 }
 // 怪物/NPC 进入视野: 复用 addOther 实体管线(移动 GC_MOVE→otherStep, 消失 GC_DELETE_OBJECT→removeOther 已通用)。
 async function addCreature(c) {
