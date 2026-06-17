@@ -80,12 +80,14 @@ import { initTerrain, buildBlock, buildZoneObjects } from "../src/terrain.js";
 import { LoginScreen } from "../src/ui-login.js";
 import { CharSelectScreen } from "../src/ui-charselect.js";
 import { CharCreateScreen } from "../src/ui-charcreate.js";
+import { QuickBar } from "../src/ui-quickbar.js";
 import { HudHpBar } from "../src/ui-hud.js";
 import { InventoryUI } from "../src/ui-inventory.js";
 import { ShopUI } from "../src/ui-shop.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCLQueryCharacterName, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
   encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell, encCGUsePotionFromInventory,
+  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 import { loadItemInf, getItemInfo } from "../src/iteminfo.js";
 import { loadMonsterMap, loadCreatureSprite, monsterFrameID, spriteFrameID } from "../src/creature-sprite.js";
@@ -132,6 +134,7 @@ addEventListener("keydown", (e) => {
   if (document.activeElement === chatEl) return;            // 聊天输入时不触发移动/动作
   if (!window.__player) return;
   if (e.key === " ") { e.preventDefault(); renderer.playAction("attack"); return; }      // 空格 = 攻击
+  if (e.key >= "1" && e.key <= "8" && quickBar) { e.preventDefault(); quickBar.useSlot(+e.key - 1); return; } // 1~8 = 快捷栏喝药/用物
   if (e.key === "k" || e.key === "K") { e.preventDefault(); renderer.playAction("die", true); return; } // K = 死亡
   if (!KEY[e.key]) return; e.preventDefault(); held.add(e.key); applyIntent();
 });
@@ -462,7 +465,33 @@ function cancelInvCursor() {
   }
   if (invUI) invUI.clearCursor();
 }
-function refreshInv() { if (invUI && invUI._loaded) invUI.setData(invItems, gearItems); }
+function refreshInv() {
+  if (invUI && invUI._loaded) invUI.setData(invItems, gearItems);
+  if (quickBar) { if (!quickBar.itemPack && invUI && invUI.itemPack) quickBar.setItemPack(invUI.itemPack); quickBar.setGear(gearItems); }  // itemPack 懒到位后补给快捷栏
+}
+
+// 底部快捷栏(=Belt 腰带内置 inventory; 见 memory helea-web-quickbar-belt)。内容随入世/换区从腰带项 sub[] 重置;
+// 绑定乐观(服务端成功无回包, 失败 GCCannotAdd 回滚); 喝药发包不乐观改数量(满血会 GCCannotUse, 数量由换区 setGear 纠正)。
+let quickBar = null, _pendingQuickBind = null;
+function ensureQuickBar() {
+  if (quickBar) return quickBar;
+  quickBar = new QuickBar($("game"));
+  if (invUI && invUI.itemPack) quickBar.setItemPack(invUI.itemPack);
+  quickBar.setCursorGetter(() => invCursorItem);                              // 背包光标持物(绑定来源)
+  quickBar.setBindHandler((slotID) => {                                       // 光标药水→腰带槽(乐观)
+    const it = invCursorItem; if (!it) return;
+    if (gws && gws.readyState === 1) gws.send(encCGAddMouseToQuickSlot({ objectID: it.objectID, slotID }));
+    _pendingQuickBind = { objectID: it.objectID, item: { ...it }, slotID };   // GCCannotAdd 失败回滚用
+    const belt = gearItems.find((g) => g.itemClass === 26);                   // 更新腰带 sub 保持 gearItems 权威
+    if (belt) { belt.sub = (belt.sub || []).filter((s) => s.slotID !== slotID); belt.sub.push({ objectID: it.objectID, itemClass: it.itemClass, itemType: it.itemType, num: it.num || 1, slotID }); }
+    invCursorItem = null; invCursorFrom = null; if (invUI) invUI.clearCursor(); refreshInv();   // 药水入腰带不回背包; refreshInv 顺带 setGear
+  });
+  quickBar.setUseHandler((it, slotID) => {                                    // 喝药: HP/MP 走 GC_MODIFY_INFORMATION→applyMods
+    if (gws && gws.readyState === 1) gws.send(encCGUsePotionFromQuickSlot({ objectID: it.objectID, slotID }));
+    log(`▶ 快捷栏喝药 槽${slotID + 1}`, "ok");
+  });
+  return quickBar;
+}
 
 // NPC 对话框: 显示服务端直发的 GBK 中文对话(GCNPCSayDynamic)。美术暂用暗金 DOM
 // (开源 npcdialog.spk/npcface 精确布局+头像索引待调研, 按降序先 DOM 手搓; 文本/数据 100% 忠实)。
@@ -550,7 +579,7 @@ function firstFreeInvSlot(item) {
 function onGamePacket(p) {
   if (p.name === "GC_UPDATE_INFO") {
     if (p.curHP !== undefined) { hpmp.hp = p.curHP; hpmp.hpMax = p.maxHP || 1; hpmp.mp = p.curMP; hpmp.mpMax = p.maxMP || 1; updateHud(); applyCharFull(p); }
-    if (p.inventory) { invCursorItem = null; invCursorFrom = null; if (invUI) invUI.clearCursor(); invItems = p.inventory; gearItems = p.gear || []; ensureInvUI(); refreshInv(); }  // 入世/换区: 全量背包+装备, 清光标
+    if (p.inventory) { invCursorItem = null; invCursorFrom = null; if (invUI) invUI.clearCursor(); invItems = p.inventory; gearItems = p.gear || []; ensureInvUI(); ensureQuickBar(); refreshInv(); }  // 入世/换区: 全量背包+装备, 清光标
     groundItems = {};                                                                                      // 换区: 清地面物数据(plane 由 renderer.clearGroundItems 清)
     // 真实 zone: 从包解析(三族均对真实包核对)。决定加密 code + 加载哪张图(含传送换区)。
     const parsed = (p.zoneID && ZONEMAP[p.zoneID]) ? p.zoneID : null;
@@ -588,7 +617,13 @@ function onGamePacket(p) {
     const i = gearItems.findIndex((it) => it.slotID === p.slotID);
     if (i >= 0) { const it = gearItems[i]; gearItems.splice(i, 1); it.invenX = p.invenX; it.invenY = p.invenY; delete it.slotID; invItems.push(it); refreshInv(); }
   }
-  else if (p.name === "GC_CANNOT_ADD") { cancelInvCursor(); }                                              // 操作失败: 光标物品回原位
+  else if (p.name === "GC_CANNOT_ADD") {                                                                   // 操作失败: 光标物品回原位
+    if (_pendingQuickBind && _pendingQuickBind.objectID === p.objectID) {                                  // 快捷栏绑定被拒(无腰带/类型不符/槽满)→回滚: 腰带sub移除+药水回背包
+      const belt = gearItems.find((g) => g.itemClass === 26);
+      if (belt && belt.sub) belt.sub = belt.sub.filter((s) => s.objectID !== _pendingQuickBind.objectID);
+      invItems.push(_pendingQuickBind.item); _pendingQuickBind = null; refreshInv();
+    } else cancelInvCursor();
+  }
   else if (p.name === "GC_ADD_NEW_ITEM_TO_ZONE" || p.name === "GC_ADD_ITEM_TO_ZONE") {                     // 地面掉落物(新掉/入世已有)
     groundItems[p.objectID] = { x: p.x, y: p.y, itemType: p.itemType };
     const s = (invUI && invUI.itemPack) ? invUI.itemPack.get(p.itemType) : null;                          // item.ispk 尽力而为图标, 缺则黄块
@@ -807,7 +842,8 @@ function selectAndEnter(ch) {
 // 调试钩子(真机验证脚本用): 程序化登录/选角, 绕开画布登录屏点击。
 window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreature: loadCreatureAssets, monsterFrameID, spriteFrameID, showNPCAsk,
   openShop: (list) => { const s = ensureShopUI(); s.race = myRace; s.open(0xABCD, list); },  // 验证用: 喂假 GCShopList 直接开商店窗
-  selScreen: () => charSelect, ccScreen: () => charCreate, showCharSelect };                  // 验证用: 选角/建角屏
+  selScreen: () => charSelect, ccScreen: () => charCreate, showCharSelect,                     // 验证用: 选角/建角屏
+  qbTest: (gear) => { const q = ensureQuickBar(); q.setGear(gear); return q; } };              // 验证用: 喂假腰带 gear 测快捷栏
 // 渲染服务端角色列表: 每个角色一个按钮(可选), 有空槽再给「创建新角色」入口。
 function renderPCList(p) {
   const box = $("pclist"); box.style.display = "block";
