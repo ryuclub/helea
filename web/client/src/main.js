@@ -498,7 +498,7 @@ function onGamePacket(p) {
   else if (p.name === "GC_SKILL_TO_OBJECT_OK_1") { applyMods(p.mods); onSkillHit(p.targetID, p.skillType, p.effectID); log(`◀ 技能命中 #${p.targetID}`, "ok"); }   // 我命中: 自身ModifyInfo(经验/HP)+目标效果(怪HP走 setCreatureHP 飘字)
   else if (p.name === "GC_SKILL_TO_OBJECT_OK_2" || p.name === "GC_SKILL_TO_OBJECT_OK_4" || p.name === "GC_SKILL_TO_OBJECT_OK_5") { if (p.targetID) onSkillHit(p.targetID, p.skillType); }   // 他人技能(广播): 目标身上播效果
   else if (p.name === "GC_SKILL_FAILED_1") { log("◀ 技能失败(距离/冷却/未命中)", "err"); if (renderer) renderer.floatOnPlayer("未命中", "#ddd"); if (skillBar) skillBar.disarm(); if (renderer) renderer.armSkill(null); }   // 我的技能失败→飘字+取消装填
-  else if (p.name === "GC_CREATURE_DIED") { const e = renderer._others && renderer._others.get(p.objectID); if (e) renderer.killOther(p.objectID); else death.onDeath(); }   // 死者: 视野内他人→死亡动画; 否则(可能是我)→死亡(HP≤0 已主判)
+  else if (p.name === "GC_CREATURE_DIED") { if (renderer._others && renderer._others.get(p.objectID)) renderer.killOther(p.objectID); }   // 通用死亡广播(怪/他人)→死亡动画。★玩家自死只靠 HP≤0(applyMods onDeath)判定, 此包不兜底(否则怪死会误判成我死)
   else if (p.name === "GC_USE_BONUS_POINT_OK") { charpanel.onBonusOk(); }                                  // 加点成功(已乐观, 属性走 GC_MODIFY_INFORMATION)
   else if (p.name === "GC_USE_BONUS_POINT_FAIL") { charpanel.onBonusFail(); }                              // 加点失败→回滚+提示
   // ── 其他玩家可见(三族, 各自精灵包) ──
