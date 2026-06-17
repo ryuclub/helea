@@ -441,6 +441,14 @@ function showLevelUp(level) {
   if (player && renderer) loadLevelUpEffect(myRace).then((eff) => { if (eff) renderer.playCreatureEffect(player, eff); }).catch(() => {});
 }
 
+// 技能命中目标 → 在目标身上播命中效果(占位; 效果精灵动画见 task#16)。怪物 HP/伤害飘字走各自 HP 更新包。
+function onSkillHit(targetID, skillType, effectID) {
+  if (!renderer) return;
+  const e = renderer._others && renderer._others.get(targetID);
+  if (!e) return;
+  // TODO(task#16): 按 skillType→效果 加载 Effect.efpk 命中动画播在 e 上(复用 playCreatureEffect)。
+}
+
 // 角色信息面板(C 键开关)。数据忠实来自服务端; 美术暂用 DOM(infoXXX.spk 完整面板留后续)。
 let charPanel = null;
 const ATTR_OF = { 0: "int", 1: "str", 2: "dex" };   // INC_INT/STR/DEX → hpmp 字段
@@ -689,6 +697,9 @@ function onGamePacket(p) {
     applyMods(p.mods);
   }
   else if (p.name === "GC_SKILL_INFO") { ensureSkillBar().setSkills(p.skills); log(`◀ GC_SKILL_INFO ${p.race} 技能 ${p.skills.length}(可用 ${p.skills.filter((s) => s.enable).length})`, "ok"); }   // 入世下发技能列表→技能栏
+  else if (p.name === "GC_SKILL_TO_OBJECT_OK_1") { applyMods(p.mods); onSkillHit(p.targetID, p.skillType, p.effectID); log(`◀ 技能命中 #${p.targetID}`, "ok"); }   // 我命中: 自身ModifyInfo(经验/HP)+目标效果(怪HP走 setCreatureHP 飘字)
+  else if (p.name === "GC_SKILL_TO_OBJECT_OK_2" || p.name === "GC_SKILL_TO_OBJECT_OK_4" || p.name === "GC_SKILL_TO_OBJECT_OK_5") { if (p.targetID) onSkillHit(p.targetID, p.skillType); }   // 他人技能(广播): 目标身上播效果
+  else if (p.name === "GC_SKILL_FAILED_1") { log("◀ 技能失败(距离/冷却/未命中)", "err"); if (skillBar) skillBar.disarm(); if (renderer) renderer.armSkill(null); }   // 我的技能失败→提示+取消装填
   else if (p.name === "GC_USE_BONUS_POINT_OK") { _pendingBonus = null; }                                   // 加点成功(已乐观, 属性走 GC_MODIFY_INFORMATION)
   else if (p.name === "GC_USE_BONUS_POINT_FAIL") { if (_pendingBonus) { hpmp.bonus++; hpmp[_pendingBonus.attr]--; _pendingBonus = null; updateCharPanel(); log("加点失败", "err"); } }
   // ── 其他玩家可见(三族, 各自精灵包) ──

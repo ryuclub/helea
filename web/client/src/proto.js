@@ -105,7 +105,12 @@ export const PACKET = {
   // 技能(P1): 对怪 CG_SKILL_TO_OBJECT(106) SkillType u16+CEffectID u16+TargetObjID u32 (SHUFFLE_3)
   CG_SKILL_TO_OBJECT: 106,
   GC_SKILL_INFO: 361,                  // 入世下发角色技能列表: PCType u8+技能数 u8+每PCSkillInfo
-  GC_SKILL_TO_OBJECT_OK_1: 364,        // 命中: SkillType+CEffectID+Target+Duration+Grade+ModifyInfo(施法者属性)
+  GC_SKILL_TO_OBJECT_OK_1: 364,        // 给施法者: SkillType+CEffectID+Target+Duration+Grade+ModifyInfo(施法者属性)
+  GC_SKILL_TO_OBJECT_OK_2: 365,        // 广播: ObjectID(施法者)+SkillType+Duration+Grade+ModifyInfo
+  GC_SKILL_TO_OBJECT_OK_3: 366,        // 广播(指向地块): ObjectID+SkillType+TargetX+TargetY+Grade
+  GC_SKILL_TO_OBJECT_OK_4: 367,        // 广播: ObjectID+SkillType+Duration+Grade
+  GC_SKILL_TO_OBJECT_OK_5: 368,        // 广播(指向目标): ObjectID+TargetObjectID+SkillType+Duration+Grade
+  GC_SKILL_TO_OBJECT_OK_6: 369,        // 广播(指向坐标): X+Y+SkillType+Duration+Grade+ModifyInfo
 };
 export const NAME = Object.fromEntries(Object.entries(PACKET).map(([k, v]) => [v, k]));
 
@@ -682,6 +687,16 @@ export function decode(u8) {
     else if (id === PACKET.GC_ADD_VAMPIRE) { out.creature = readVampOustInfo(r, "vampire"); }
     else if (id === PACKET.GC_ADD_OUSTERS) { out.creature = readVampOustInfo(r, "ousters"); }
     else if (id === PACKET.GC_SKILL_INFO) { const si = readSkillInfo(r); out.pcType = si.pcType; out.race = si.race; out.skills = si.skills; }
+    // 技能命中回包(明文)。OK_1=给施法者(我), OK_2~6=广播他人/AOE。字段忠实开源 GCSkillToObjectOK[1-6]::read。
+    else if (id === PACKET.GC_SKILL_TO_OBJECT_OK_1) { out.skillType = r.u16(); out.effectID = r.u16(); out.targetID = r.u32(); out.duration = r.u16(); out.grade = r.u8(); out.mods = readMods(r); }
+    else if (id === PACKET.GC_SKILL_TO_OBJECT_OK_2) { out.objectID = r.u32(); out.skillType = r.u16(); out.duration = r.u16(); out.grade = r.u8(); out.mods = readMods(r); }
+    else if (id === PACKET.GC_SKILL_TO_OBJECT_OK_3) { out.objectID = r.u32(); out.skillType = r.u16(); out.x = r.u8(); out.y = r.u8(); out.grade = r.u8(); }
+    else if (id === PACKET.GC_SKILL_TO_OBJECT_OK_4) { out.objectID = r.u32(); out.skillType = r.u16(); out.duration = r.u16(); out.grade = r.u8(); }
+    else if (id === PACKET.GC_SKILL_TO_OBJECT_OK_5) { out.objectID = r.u32(); out.targetID = r.u32(); out.skillType = r.u16(); out.duration = r.u16(); out.grade = r.u8(); }
+    else if (id === PACKET.GC_SKILL_TO_OBJECT_OK_6) { out.x = r.u8(); out.y = r.u8(); out.skillType = r.u16(); out.duration = r.u16(); out.grade = r.u8(); out.mods = readMods(r); }
+    // 技能失败。FAILED_1=给施法者(SkillType+Grade+ModifyInfo), FAILED_2=广播(flag+ObjID+Target+SkillType+Grade)。
+    else if (id === PACKET.GC_SKILL_FAILED_1) { out.skillType = r.u16(); out.grade = r.u8(); out.mods = readMods(r); }
+    else if (id === PACKET.GC_SKILL_FAILED_2) { out.flag = r.u8(); out.objectID = r.u32(); out.targetID = r.u32(); out.skillType = r.u16(); out.grade = r.u8(); }
     else if (id === PACKET.GC_ADD_MONSTER) { out.creature = readMonster(r); }
     else if (id === PACKET.GC_ADD_NPC) { out.creature = readNPC(r); }
     // 近战命中确认(给攻击者): TargetObjectID + ModifyInfo(攻击者自身属性变化, short{type,value u16}+long{type,value u32})
