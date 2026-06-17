@@ -42,6 +42,27 @@ export function parseCFPK(buf) {
   return { frameIDs, end: p };
 }
 
+// 解析 .efpk(=CEffectFramePack 特效帧包) → frameIDs[FrameID][dir] = [{s,cx,cy,back}, ...]。
+// 结构 3 维(无 action 维, 区别 cfpk): u16 nFrameID + 每[u8 nDir + 每[u16 nFrame + nFrame×CEffectFrame(7B)]]。
+// CEffectFrame = CFrame(s u16 + cx i16 + cy i16) + light u8(高位bit=背景层 m_bBackground)。
+export function parseEFPK(buf) {
+  const dv = asView(buf); let p = 0;
+  const u8 = () => dv.getUint8(p++);
+  const u16 = () => { const v = dv.getUint16(p, true); p += 2; return v; };
+  const i16 = () => { const v = dv.getInt16(p, true); p += 2; return v; };
+  const nFrameID = u16(); const frameIDs = [];
+  for (let f = 0; f < nFrameID; f++) {
+    const nDir = u8(); const dirs = [];
+    for (let d = 0; d < nDir; d++) {
+      const nFr = u16(); const frames = [];
+      for (let i = 0; i < nFr; i++) { const s = u16(), cx = i16(), cy = i16(), lt = u8(); frames.push({ s, cx, cy, back: !!(lt & 0x80) }); }
+      dirs.push(frames);
+    }
+    frameIDs.push(dirs);
+  }
+  return { frameIDs, end: p };
+}
+
 // 取某 FrameID 的某动作 → 8 个方向的帧序列(每帧 {s,cx,cy})。无该动作返回 null。
 export function getActionSeqs(cfpk, frameID, action) {
   const fid = cfpk.frameIDs[frameID];

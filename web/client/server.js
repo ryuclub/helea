@@ -104,6 +104,64 @@ async function handleMonsterMap(res) {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" }); res.end(_monsterMap);
   } catch (e) { res.writeHead(500, { "Content-Type": "application/json" }); res.end("{}"); }
 }
+// Alpha 精灵包(.aspk)单精灵解码 —— 特效精灵(升级光柱等)。文件 160MB 不能整发, 用 .aspki 偏移定位单精灵, 服务端解码成 RGBA 切片返回。
+// .aspki: [u16 count] + count×i32 绝对偏移。.aspk: [u16 count] + 各精灵。
+// 单精灵: [u32 bodyLen][u16 W][u16 H] + 逐行(u8 段数 + 每段[u8 透明跳过 + u8 像素数 + 像素数×u16 565色]) + 行尾(H×u16 行长, 跳过)。
+// 565 色 → RGBA; alpha=max(r,g,b)(特效叠加发光, 暗边自然淡出)。返回二进制: [u16 count] + 每精灵[u32 id][u16 W][u16 H][W*H*4 RGBA]。
+const _aspkOffCache = new Map();
+function aspkOffsets(aspkiPath) {
+  let o = _aspkOffCache.get(aspkiPath);
+  if (!o) { const b = fs.readFileSync(aspkiPath); const n = b.readUInt16LE(0); o = new Int32Array(n); for (let i = 0; i < n; i++) o[i] = b.readInt32LE(2 + i * 4); _aspkOffCache.set(aspkiPath, o); }
+  return o;
+}
+function decodeAspkSprite(fd, off) {
+  const head = Buffer.alloc(8); fs.readSync(fd, head, 0, 8, off);
+  const bodyLen = head.readUInt32LE(0), W = head.readUInt16LE(4), H = head.readUInt16LE(6);
+  if (!W || !H || W > 4096 || H > 4096) return { W: 0, H: 0, rgba: Buffer.alloc(0) };
+  const body = Buffer.alloc(bodyLen); fs.readSync(fd, body, 0, bodyLen, off + 8);
+  const rgba = Buffer.alloc(W * H * 4); let p = 0;
+  for (let y = 0; y < H; y++) {
+    if (p >= bodyLen) break;
+    const segCount = body[p++]; let x = 0;
+    for (let s = 0; s < segCount && p + 1 < bodyLen; s++) {
+      x += body[p++]; const pix = body[p++];
+      for (let k = 0; k < pix && p + 1 < bodyLen; k++) {
+        const c = body.readUInt16LE(p); p += 2;
+        const r5 = (c >> 11) & 0x1f, g6 = (c >> 5) & 0x3f, b5 = c & 0x1f;
+        const r = (r5 << 3) | (r5 >> 2), g = (g6 << 2) | (g6 >> 4), b = (b5 << 3) | (b5 >> 2);
+        if (x < W) { const o = (y * W + x) * 4; rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b; rgba[o + 3] = Math.max(r, g, b); }
+        x++;
+      }
+    }
+  }
+  return { W, H, rgba };
+}
+const _aspkCache = new Map();   // "name|ids" -> Buffer
+function handleAspk(req, res) {
+  try {
+    const u = new URL(req.url, "http://x");
+    const name = (u.searchParams.get("name") || "").replace(/[^A-Za-z0-9]/g, "");
+    const ids = (u.searchParams.get("ids") || "").split(",").map((s) => parseInt(s, 10)).filter((n) => Number.isInteger(n) && n >= 0).slice(0, 1024);
+    if (!name || !ids.length) { res.writeHead(400); res.end("400"); return; }
+    const key = name + "|" + ids.join(",");
+    const hit = _aspkCache.get(key);
+    if (hit) { res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "public, max-age=86400" }); res.end(hit); return; }
+    const aspk = path.join(IMAGEROOT, realImageName(name + ".aspk")), aspki = path.join(IMAGEROOT, realImageName(name + ".aspki"));
+    const offs = aspkOffsets(aspki), fd = fs.openSync(aspk, "r");
+    const parts = [Buffer.alloc(2)]; parts[0].writeUInt16LE(ids.length);
+    try {
+      for (const id of ids) {
+        const off = (id < offs.length) ? offs[id] : -1;
+        const sp = (off >= 0) ? decodeAspkSprite(fd, off) : { W: 0, H: 0, rgba: Buffer.alloc(0) };
+        const hdr = Buffer.alloc(8); hdr.writeUInt32LE(id, 0); hdr.writeUInt16LE(sp.W, 4); hdr.writeUInt16LE(sp.H, 6);
+        parts.push(hdr, sp.rgba);
+      }
+    } finally { fs.closeSync(fd); }
+    const buf = Buffer.concat(parts); _aspkCache.set(key, buf);
+    res.writeHead(200, { "Content-Type": "application/octet-stream", "Cache-Control": "public, max-age=86400" }); res.end(buf);
+  } catch (e) { const code = (e && e.code === "ENOENT") ? 404 : 500; res.writeHead(code); res.end(String(code)); }
+}
+
 const MIME = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -121,7 +179,7 @@ const MIME = {
 // 目的: ① 彻底消除高并发突发请求下的句柄耗尽(EMFILE)—— 这正是"偶发瓦片请求失败→客户端永久黑洞"的服务端触发源;
 //       ② 避免重复磁盘 IO。.html/.js 不缓存(开发期改了即刷即见)。
 const ASSET_CACHE = new Map();           // file -> Buffer
-const CACHEABLE = new Set([".spk", ".spki", ".ispk", ".ispki", ".cfpk", ".cfpki", ".map", ".ifr"]);
+const CACHEABLE = new Set([".spk", ".spki", ".ispk", ".ispki", ".cfpk", ".cfpki", ".efpk", ".efpki", ".map", ".ifr", ".inf"]);
 
 function sendFile(res, file) {
   const ext = path.extname(file);
@@ -151,6 +209,7 @@ http.createServer((req, res) => {
   let p = decodeURIComponent(req.url.split("?")[0]);
   if (req.method === "POST" && p === "/api/register") return handleRegister(req, res);
   if (p === "/api/monstermap") return handleMonsterMap(res);
+  if (p === "/api/aspk") return handleAspk(req, res);
   if (p === "/") p = "/public/index.html";
   // 开源 UI 资源: /ui/<相对 Data/Ui 的路径>(如 /ui/spk/login.spk, /ui/txt/ui.ifr)。独立穿越防护。
   let file;
@@ -180,7 +239,7 @@ http.createServer((req, res) => {
       const spk = realImageName(m[1] + ".ispk"), spki = realImageName(m[1] + ".ispki");
       return serveChunk(res, path.join(IMAGEROOT, spk), path.join(IMAGEROOT, spki), parseInt(m[2], 10), 64, p);
     }
-    if ((m = rel.match(/^(.+\.cfpk)$/))) {                      // 整 cfpk 直接发(客户端整包解析)
+    if ((m = rel.match(/^(.+\.[ce]fpk)$/))) {                   // 整 cfpk(角色/怪)/efpk(特效)直接发(客户端整包解析)
       return sendFile(res, path.join(IMAGEROOT, realImageName(m[1])));
     }
     // 其余(zonemap.json 等实体)→ web/client/public/assets/

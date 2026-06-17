@@ -75,6 +75,7 @@
 import { GameRenderer } from "../src/render.js";
 import { parseCFPK, getActionSeqs } from "../src/cfpk.js";
 import { loadSpritesById, fetchBuf } from "../src/pack.js";
+import { loadLevelUpEffect } from "../src/effect.js";
 import { RACE_SPRITE_PACK, raceActions, raceFrameID } from "../src/creature-anim.js";
 import { initTerrain, buildBlock, buildZoneObjects } from "../src/terrain.js";
 import { LoginScreen } from "../src/ui-login.js";
@@ -419,6 +420,8 @@ function showLevelUp(level) {
   clearTimeout(_levelUpTimer);
   _levelUpTimer = setTimeout(() => { _levelUpEl.style.opacity = "0"; _levelUpEl.style.top = "33%"; }, 1900);
   log(`★ 升级! 等级 ${level}`, "ok");
+  // 复刻开源升级效果精灵(EFFECTSTATUS_LEVELUP_xxx 光柱): 在角色身上播放 Effect.efpk 帧动画。
+  if (player && renderer) loadLevelUpEffect(myRace).then((eff) => { if (eff) renderer.playCreatureEffect(player, eff); }).catch(() => {});
 }
 
 // 角色信息面板(C 键开关)。数据忠实来自服务端; 美术暂用 DOM(infoXXX.spk 完整面板留后续)。

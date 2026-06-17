@@ -47,6 +47,7 @@ export class GameRenderer {
     this.canvas = canvas; this.entities = [];
     this._others = new Map();        // objectID -> 其他玩家/怪物/NPC 实体(复用主角精灵管线)
     this._floaters = [];             // 飘字(伤害数字): {x,y,z(世界), text, t0, color}
+    this._effects = [];              // 一次性特效(升级光柱等): {entity, plane, mat, seq, textures, idx, t0, frameMs}
     this._groundItems = new Map();   // objectID -> 地面掉落物 {plane,mat,col,row}
     this._walls = [];                // 可透明墙(bTrans)网格 {mesh,gx,gy,w,h,vpRow}: 角色走到墙后→半透明(开源 IsWallTransPosition)
     this._blocks = new Map();        // "bx,by" -> {bx,by,ground,buildings:[],loading}
@@ -546,6 +547,42 @@ void main(){
     this.intent = { dc: 0, dr: 0 }; this.path = null; e.stepping = false;
   }
 
+  // 在生物身上播放一次性特效精灵动画(复刻开源 EFFECTSTATUS, 如升级光柱)。
+  // eff={frames(s→{rgba,width,height}), anim(dir→[{s,cx,cy,back}])}; dir 朝向(升级用 down=2)。
+  playCreatureEffect(entity, eff, dir = 2) {
+    if (!entity || !eff || !eff.anim) return;
+    const seq = eff.anim[dir] || eff.anim[2] || eff.anim.find((d) => d && d.length);
+    if (!seq || !seq.length) return;
+    const B = BABYLON;
+    const plane = B.MeshBuilder.CreatePlane("eff", { size: 1 }, this.scene);
+    const mat = new B.StandardMaterial("effm", this.scene);
+    mat.emissiveColor = new B.Color3(1, 1, 1); mat.disableLighting = true;
+    // 特效=发光火焰/光柱: 用 alpha 混合(软淡出, 对齐开源 memcpyAlpha 线性混合), 而非 ALPHATEST 硬切(会丢失光晕渐隐)。
+    mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHABLEND; mat.specularColor = B.Color3.Black();
+    mat.alphaMode = B.Engine.ALPHA_COMBINE; mat.backFaceCulling = false;
+    plane.material = mat;
+    const textures = {};
+    for (const fr of seq) { const f = eff.frames[fr.s]; if (f && !textures[fr.s]) { const tx = B.RawTexture.CreateRGBATexture(f.rgba, f.width, f.height, this.scene, false, true, B.Texture.NEAREST_SAMPLINGMODE); tx.hasAlpha = true; textures[fr.s] = { tx, w: f.width, h: f.height }; } }
+    this._effects.push({ entity, plane, mat, seq, textures, t0: performance.now(), frameMs: 55 });  // ~18fps(开源 delayFrame30)
+  }
+  // 每帧推进特效: 按时间取帧, 跟随生物当前格定位(效果略前于生物), 播完一遍 dispose。
+  _updateEffects(now) {
+    if (!this._effects.length) return;
+    this._effects = this._effects.filter((ef) => {
+      const idx = Math.floor((now - ef.t0) / ef.frameMs);
+      if (idx >= ef.seq.length) { try { ef.plane.dispose(); ef.mat.dispose(); for (const k in ef.textures) ef.textures[k].tx.dispose(); } catch {} return false; }
+      const fr = ef.seq[idx], t = ef.textures[fr.s];
+      if (!t) { ef.plane.setEnabled(false); return true; }
+      ef.plane.setEnabled(true);
+      const en = ef.entity, tl = this._tileGTL(en.col, en.row);     // 跟生物当前格(升级时静止)
+      const w = this._gw(tl.x + fr.cx + t.w / 2, tl.y + fr.cy + t.h / 2);
+      ef.plane.position.set(w.x, w.y, depthZ(tl.y + TH / 2) - 0.02);  // 略前于生物(特效叠在前)
+      ef.plane.scaling.x = t.w; ef.plane.scaling.y = t.h;
+      ef.mat.diffuseTexture = t.tx;
+      return true;
+    });
+  }
+
   // 格子可走性: 在界内 且 非 BLOCK_GROUND(0x02)
   _walkable(col, row) {
     const m = this._map;
@@ -653,6 +690,7 @@ void main(){
       this._updateBlocks(e ? e.col : this._focusCol, e ? e.row : this._focusRow); // 区块网格: 每帧载/卸1块
       this._drainBuildQueue();            // 建筑限速创建(全局 BUILD_PER_FRAME/帧)
       for (const o of this._others.values()) this._updateOther(o, now, FRAME_MS); // 其他玩家逐帧驱动
+      this._updateEffects(now);           // 一次性特效(升级等)逐帧 + 播完移除
       if (!e) return;
       // 动画时钟: 按真实时间推进序列(cfpk 序列已编码姿势保持) —— 与位移解耦, 不卡帧
       if (!e._lastNow) e._lastNow = now;
