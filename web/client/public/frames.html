@@ -1,0 +1,36 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>选攻击/死亡 action</title>
+<style>body{background:#222;color:#ddd;font:12px monospace;margin:0;padding:12px}
+#info{color:#9f9;margin-bottom:10px;font-size:14px}
+.grid{display:flex;flex-wrap:wrap;gap:16px}
+.col{text-align:center;width:130px} .col canvas{background:#111;image-rendering:pixelated;border:1px solid #555}
+.lab{color:#fd6;margin-top:4px}</style></head>
+<body>
+<div id="info">解码中…</div><div class="grid" id="root"></div>
+<script type="module">
+import { decodeCIndexSprite } from "../src/spk.js";
+import { parseCFPK } from "../src/cfpk.js";
+const CS=64, base="/public/assets/slayerpack/", pad5=n=>String(n).padStart(5,"0");
+const cache=new Map();
+async function ensure(id){const nm=pad5(Math.floor(id/CS)*CS)+".ispk";if(!cache.has(nm)){try{cache.set(nm,new Uint8Array(await(await fetch(base+nm)).arrayBuffer()))}catch{cache.set(nm,null)}}return cache.get(nm);}
+async function spr(id){const buf=await ensure(id);if(!buf)return null;const w=id%CS;let off=2,s=null;try{for(let i=0;i<=w;i++){s=decodeCIndexSprite(buf,off);off=s.end;}}catch{return null;}return s;}
+const cfpk=parseCFPK(new Uint8Array(await(await fetch("/public/assets/acslayerman.cfpk")).arrayBuffer()));
+const F0=cfpk.frameIDs[0];
+const SC=2.6, FPS=12, DIR=2; // DOWN
+const root=document.getElementById("root");
+for(let a=8;a<F0.length;a++){
+  const seq=F0[a][DIR]; if(!seq||!seq.length) continue;
+  const sprites={}; for(const fr of seq){ if(!(fr.s in sprites)) sprites[fr.s]=await spr(fr.s); }
+  const ws=seq.map(f=>sprites[f.s]?.width||1), hs=seq.map(f=>sprites[f.s]?.height||1);
+  const maxW=Math.max(...ws), maxH=Math.max(...hs);
+  const col=document.createElement("div");col.className="col";
+  const cv=document.createElement("canvas");cv.width=maxW;cv.height=maxH;cv.style.width=(maxW*SC)+"px";cv.style.height=(maxH*SC)+"px";
+  const ctx=cv.getContext("2d");
+  const lab=document.createElement("div");lab.className="lab";lab.textContent=`action ${a} (${[...new Set(seq.map(f=>f.s))].length}帧)`;
+  col.appendChild(cv);col.appendChild(lab);root.appendChild(col);
+  let k=0;
+  setInterval(()=>{const fr=seq[k%seq.length];k++;const s=sprites[fr.s];ctx.clearRect(0,0,maxW,maxH);
+    if(s)ctx.putImageData(new ImageData(new Uint8ClampedArray(s.rgba),s.width,s.height),Math.floor((maxW-s.width)/2),maxH-s.height);},1000/FPS);
+}
+document.getElementById("info").textContent="FrameID0 的 action 8–42 循环动画(DOWN)。找『攻击(挥武器/开枪)』和『死亡(倒下)』, 告诉我编号。";
+window.__done=true;
+</script></body></html>
