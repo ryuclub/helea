@@ -539,7 +539,7 @@ void main(){
   }
 
   // 键盘移动意图: dc,dr ∈ {-1,0,1}; (0,0)=松开停步。移动会中断/解除一次性动作(攻击/死亡)。
-  setIntent(dc, dr) { this.intent = { dc, dr }; if (dc || dr) { this.path = null; if (this.player) this.player.oneShot = null; } }
+  setIntent(dc, dr) { this.intent = { dc, dr }; if (dc || dr) { this.path = null; this._atkTarget = null; if (this.player) this.player.oneShot = null; } }   // 键盘移动→取消攻击锁定
 
   // 服务器权威移动: 设置移动请求回调。设了之后, 移动意图不再本地步进, 而是回调(dir,curCol,curRow)发 CG_MOVE,
   // 等服务器 GC_MOVE_OK 后由 serverStep 播放到新格。null=本地模拟模式。
@@ -575,6 +575,25 @@ void main(){
       if (d < bestD) { bestD = d; best = { col: c, row: r }; }
     }
     if (best) this.moveTo(best.col, best.row);
+  }
+  // 锁定目标战斗(每帧驱动): 与目标相邻则面向+攻击(冷却门槛), 否则空闲时寻路逼近。点一次怪即持续追打。
+  // 目标消失/死亡 → 解除锁定。键盘移动/点地面会清 _atkTarget。
+  _tickCombat(now) {
+    const oid = this._atkTarget; if (oid == null) return;
+    const e = this._others.get(oid), pe = this.player;
+    if (!e || e.dying || !e.plane || e.plane.isDisposed() || !pe) { this._atkTarget = null; return; }
+    const dist = Math.max(Math.abs(e.col - pe.col), Math.abs(e.row - pe.row));   // 切比雪夫
+    if (dist <= 1) {                                              // 相邻: 攻击(冷却门槛防 spam)
+      pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row));
+      if (now >= (this._atkCdUntil || 0)) {
+        this.playAction("attack");
+        if (this._armedSkill && this._netSkill) this._netSkill(oid, this._armedSkill);
+        else this._netAttack(oid);
+        this._atkCdUntil = now + (this.atkDelayMs || 700);        // 攻速冷却(对齐服务端节奏)
+      }
+    } else if (!pe.stepping && !this._awaitingMove && !pe.oneShot) {   // 太远且空闲: 逼近一步(到相邻自动转攻击)
+      this._approachTarget(e);
+    }
   }
   // 一次性动作(攻击 attack / 死亡 die): 播一遍。hold=true 定格末帧(死亡), 否则播完回站立。
   playAction(name, hold = false) {
@@ -668,28 +687,8 @@ void main(){
       if (p.pickedMesh) {
         for (const [oid, e] of this._others) {
           if (e.plane !== p.pickedMesh) continue;
-          if (e.kind === "monster" && this._netAttack) {
-            const pe = this.player;
-            if (pe) {
-              if (this._armedSkill && this._netSkill) {                                     // 已装填技能: 点怪释放(冷却门槛同攻击)
-                pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row));
-                const now = performance.now();
-                if (now >= (this._atkCdUntil || 0)) {
-                  this.playAction("attack"); this._netSkill(oid, this._armedSkill);
-                  this._atkCdUntil = now + (this.atkDelayMs || 700);
-                }
-                return;
-              }
-              const dist = Math.max(Math.abs(e.col - pe.col), Math.abs(e.row - pe.row));   // 切比雪夫(无朝向限制)
-              if (dist <= 1) {                                                              // 相邻: 近战攻击(冷却门槛防 spam)
-                pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row));
-                const now = performance.now();
-                if (now >= (this._atkCdUntil || 0)) {
-                  this.playAction("attack"); this._netAttack(oid);
-                  this._atkCdUntil = now + (this.atkDelayMs || 700);                        // 攻速冷却(对齐服务端节奏)
-                }
-              } else this._approachTarget(e);                                              // 太远: 寻路到怪相邻格
-            }
+          if (e.kind === "monster" && this._netAttack) {                                   // 锁定目标: 持续追打(自动逼近→相邻则攻击), 直到怪死/取消
+            this._atkTarget = oid; this._tickCombat(performance.now());
             return;
           }
           if (e.kind === "npc" && this._netNPCTalk) { this._netNPCTalk(oid); return; }
@@ -701,6 +700,7 @@ void main(){
         }
       }
       const { col, row } = this._worldToTile(p.pickedPoint);
+      this._atkTarget = null;             // 点地面移动→取消攻击锁定
       this.moveTo(col, row);
     });
   }
@@ -737,6 +737,7 @@ void main(){
       for (const o of this._others.values()) this._updateOther(o, now, FRAME_MS); // 其他玩家逐帧驱动
       this._updateEffects(now);           // 一次性特效(升级等)逐帧 + 播完移除
       if (!e) return;
+      this._tickCombat(now);              // 锁定目标: 自动逼近+攻击(点一次怪持续追打)
       // 动画时钟: 按真实时间推进序列(cfpk 序列已编码姿势保持) —— 与位移解耦, 不卡帧
       if (!e._lastNow) e._lastNow = now;
       e.animClock += now - e._lastNow; e._lastNow = now;
