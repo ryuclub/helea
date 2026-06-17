@@ -267,7 +267,7 @@ void main(){
     for (const pl of this._zoneObjects) { pl.material?.diffuseTexture?.dispose(); pl.material?.dispose(); pl.dispose(); }
     this._zoneObjects.length = 0; this._objQ = null;
     this._walls.length = 0;
-    if (this.player) { this.player.stepping = false; this._awaitingMove = false; this.path = null; }
+    if (this.player) { this.player.stepping = false; this._sendMove = 0; this.path = null; this._atkTarget = null; }
     for (const id of [...this._others.keys()]) this.removeOther(id);
     this.clearGroundItems();                                  // 换区: 清旧区地面掉落物
   }
@@ -543,24 +543,21 @@ void main(){
 
   // 服务器权威移动: 设置移动请求回调。设了之后, 移动意图不再本地步进, 而是回调(dir,curCol,curRow)发 CG_MOVE,
   // 等服务器 GC_MOVE_OK 后由 serverStep 播放到新格。null=本地模拟模式。
-  setNetMove(fn) { this._netMove = fn; this._awaitingMove = false; return this; }
-  // 服务器确认移动: 动画步进到 (nc,nr), 朝向 dir。
+  setNetMove(fn) { this._netMove = fn; this._sendMove = 0; return this; }
+  // 服务器确认移动(GC_MOVE_OK): 开源本地预测模型下, 客户端已自行走过该步, 此处仅递减待确认计数(不再驱动移动)。
   serverStep(nc, nr, dir) {
-    const e = this.player; if (!e) return;
-    this._awaitingMove = false;            // 确认到达即解除节流(原靠插值完成才清, 确认丢失会死锁→杀怪后无法逼近攻击)
-    e.dir = dir; e.action = "move";
-    e.fromCol = e.col; e.fromRow = e.row; e.toCol = nc; e.toRow = nr;
-    e.stepping = true; e.t0 = performance.now();
+    if (this._sendMove > 0) this._sendMove--;
+    // 可选: 若本地预测与服务端(nc,nr)严重偏离可矫正; 开源默认信任本地, 仅靠 GC_MOVE_ERROR 重同步。
   }
-  // 服务器拒绝移动(GC_MOVE_ERROR): 重同步到服务器坐标。
+  // 服务器拒绝移动(GC_MOVE_ERROR): 重同步到服务器坐标 + 清待确认计数 + 弃当前路径。
   serverReject(x, y) {
     const e = this.player; if (!e) return;
-    e.col = x; e.row = y; e.stepping = false; this._awaitingMove = false; this._renderAt(e, x, y);
+    e.col = x; e.row = y; e.stepping = false; this._sendMove = 0; this.path = null; this._renderAt(e, x, y);
   }
   // 传送落点: 把现有角色放到新区坐标 + 相机居中(换区后调用)。
   placePlayer(x, y) {
     const e = this.player; if (!e) return;
-    e.col = x; e.row = y; e.stepping = false; this._awaitingMove = false; e.action = "stand"; e.animIdx = 0;
+    e.col = x; e.row = y; e.stepping = false; this._sendMove = 0; e.action = "stand"; e.animIdx = 0;
     this._renderAt(e, x, y); this._centerTile(x, y);
   }
 
@@ -592,7 +589,7 @@ void main(){
         else this._netAttack(oid);
         this._atkCdUntil = now + (this.atkDelayMs || 700);        // 攻速冷却(对齐服务端节奏)
       }
-    } else if (!pe.stepping && !this._awaitingMove && !pe.oneShot) {   // 太远且空闲: 逼近一步(到相邻自动转攻击)
+    } else if (!pe.stepping && !pe.oneShot) {   // 太远且不在步进/动作中: 逼近(本地预测移动, 不阻塞)
       this._approachTarget(e);
     }
   }
@@ -729,6 +726,7 @@ void main(){
 
   start() {
     const FRAME_MS = 45; // 序列帧推进间隔(独立于位移)
+    const MAX_CLIENT_MOVE = 5; // 开源 MAX_CLIENT_MOVE: 本地预测最多领先服务端的步数(防超前)
     this.scene.onBeforeRenderObservable.add(() => {
      try {
       const now = performance.now();
@@ -765,14 +763,17 @@ void main(){
         const gx = a.x + (b.x - a.x) * p, gy = a.y + (b.y - a.y) * p;       // 逐帧像素插值(全局瓦片左上)
         this._drawFrame(e, gx, gy);
         this._camTo(gx + TW / 2, gy + TH / 2);                             // 相机平滑跟随
-        if (p >= 1) { e.col = e.toCol; e.row = e.toRow; e.stepping = false; this._awaitingMove = false; }
+        if (p >= 1) { e.col = e.toCol; e.row = e.toRow; e.stepping = false; }
       } else {
         const { dc, dr } = this._nextStepDir(e);                            // 连续走: 一步接一步
         if (dc || dr) {
-          if (this._netMove) {                                             // 服务器权威: 请求移动, 等确认
-            if (!this._awaitingMove) { e.dir = dirOf(dc, dr); this._awaitingMove = true; this._netMove(e.dir, e.col, e.row); }
+          // 忠实开源(MPlayer 本地预测): 立即本地步进 + 发 CGMove(不等确认); _sendMove 计数限流防超前。
+          if (this._netMove && (this._sendMove || 0) >= MAX_CLIENT_MOVE) { this._renderAt(e, e.col, e.row); }  // 待确认堆积(网络慢)→本帧不发新步; GC_MOVE_OK 会递减, 不会卡死
+          else if (this._beginStep(e, dc, dr)) {                            // 本地立即步进(走向下一格), 同帧发包
+            e.action = "move";
+            if (this._netMove) { this._netMove(e.dir, e.fromCol, e.fromRow); this._sendMove = (this._sendMove || 0) + 1; }  // 发包(起步格+方向); GC_MOVE_OK 仅确认计数(本地已走)
             this._renderAt(e, e.col, e.row);
-          } else { e.action = "move"; this._beginStep(e, dc, dr); this._renderAt(e, e.col, e.row); } // 本地模拟
+          } else { this._renderAt(e, e.col, e.row); }                       // 障碍/触边: beginStep=false, 停
         } else { if (e.action !== "stand") { e.action = "stand"; e.animIdx = 0; } this._renderAt(e, e.col, e.row); }
       }
       this._updateWallTransparency(e.col, e.row);   // 走到墙后→墙半透明(透出角色)
