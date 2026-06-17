@@ -2,6 +2,7 @@
 import { GameRenderer } from "./render.js";
 import { createDeathSystem } from "./systems/death.js";
 import { buildRaceAssets, loadCreatureAssets, ensureCreatureInfo, playerHeight, monsterHeight, setAssetLog } from "./systems/asset-loader.js";
+import { createCharPanel } from "./systems/charpanel.js";
 import { parseCFPK, getActionSeqs } from "./cfpk.js";
 import { loadSpritesById, fetchBuf } from "./pack.js";
 import { loadLevelUpEffect, loadEffectByStatus } from "./effect.js";
@@ -18,7 +19,7 @@ import { ShopUI } from "./ui-shop.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCLQueryCharacterName, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
   encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell, encCGUsePotionFromInventory,
-  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot, encCGUseBonusPoint, encCGSkillToObject,
+  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot, encCGSkillToObject,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "./proto.js";
 import { loadItemInf, getItemInfo } from "./iteminfo.js";
 import { loadMonsterMap, loadCreatureSprite, monsterFrameID, spriteFrameID } from "./creature-sprite.js";
@@ -252,7 +253,7 @@ function applyCharFull(p) {
   if (p.level === undefined) return;             // 非完整玩家信息(无 PCInfo2)
   for (const k of ["level", "exp", "str", "dex", "int", "strMax", "dexMax", "intMax", "strExp", "dexExp", "intExp", "gold", "fame", "alignment", "bonus"])
     if (p[k] !== undefined) hpmp[k] = p[k];
-  updateCharPanel();
+  charpanel.update();
 }
 // ModifyInfo 增量(GC_MODIFY_INFORMATION / 打怪 OK1 / 被打 OK2)按 type 分发 → 状态。type 表见 proto.js readMods。
 const _slayerDomains = {};                        // Slayer 六技能域等级, 取最高作"等级"
@@ -281,7 +282,7 @@ function applyMods(mods) {
   }
   if (hpmp.level > prevLevel && prevLevel > 0) showLevelUp(hpmp.level);   // ★升级瞬间反馈
   if (hpmp.hp <= 0 && player && !death.isDead()) death.onDeath();          // ★HP 归零 → 死亡
-  updateHud(); updateCharPanel();
+  updateHud(); charpanel.update();
 }
 
 // 升级瞬间提示: 屏幕中央渐隐金字 + log。开源有光柱/音效特效, 暂 DOM 降级(美术后续)。
@@ -324,43 +325,11 @@ function onSkillHit(targetID, skillType, effectID) {
   loadEffectByStatus(status).then((eff) => { if (eff) renderer.playCreatureEffect(e, eff); }).catch(() => {});
 }
 
-// 角色信息面板(C 键开关)。数据忠实来自服务端; 美术暂用 DOM(infoXXX.spk 完整面板留后续)。
-let charPanel = null;
-const ATTR_OF = { 0: "int", 1: "str", 2: "dex" };   // INC_INT/STR/DEX → hpmp 字段
-const _bbtn = (w) => `<span class="bonusBtn" data-w="${w}" style="cursor:pointer;padding:0 5px;margin-left:1px;color:#1a120a;background:#ffd87a;border-radius:3px;font-weight:bold">+</span>`;
-let _pendingBonus = null;
-function useBonusPoint(which) {                       // 加属性点(乐观; GC_MODIFY_INFORMATION 覆盖真实值; FAIL 回滚)
-  if (!hpmp.bonus || hpmp.bonus <= 0) return;
-  if (gws && gws.readyState === 1) gws.send(encCGUseBonusPoint({ which }));
-  const attr = ATTR_OF[which]; hpmp.bonus--; hpmp[attr]++; _pendingBonus = { attr }; updateCharPanel();
-}
-function ensureCharPanel() {
-  if (charPanel) return charPanel;
-  const d = document.createElement("div"); d.id = "charPanel";
-  d.style.cssText = "position:absolute;right:14px;top:60px;z-index:20;display:none;min-width:190px;padding:10px 13px;background:rgba(20,16,10,.92);border:1px solid #6a5a3a;border-radius:6px;color:#e8d8b0;font:12px/1.75 monospace;box-shadow:0 2px 14px #000a;pointer-events:auto;";
-  d.addEventListener("click", (e) => { const b = e.target.closest(".bonusBtn"); if (b) useBonusPoint(+b.dataset.w); });  // 委托(innerHTML 重建不丢)
-  $("game").appendChild(d); charPanel = d; return d;
-}
-function updateCharPanel() {
-  if (!charPanel || charPanel.style.display === "none") return;
-  const raceCN = { slayer: "屠夫", vampire: "吸血鬼", ousters: "魔灵" }[myRace] || myRace || "";
-  const expLine = (myRace === "slayer")
-    ? `力/敏/智经验: ${hpmp.strExp} / ${hpmp.dexExp} / ${hpmp.intExp}`
-    : `距下一级: ${hpmp.exp}`;
-  charPanel.innerHTML =
-    `<div style="font-size:13px;color:#ffd87a;border-bottom:1px solid #6a5a3a;margin-bottom:6px;padding-bottom:4px">${myCharName || ""} · ${raceCN}</div>`
-    + `等级: <b style="color:#ffd87a">${hpmp.level}</b>${myRace === "slayer" ? " <span style='color:#9a8'>技能域</span>" : ""}<br>`
-    + `HP: ${hpmp.hp}/${hpmp.hpMax}${hpmp.mpMax > 0 ? `　MP: ${hpmp.mp}/${hpmp.mpMax}` : ""}<br>`
-    + (hpmp.bonus > 0
-        ? `力STR: ${hpmp.str} ${_bbtn(1)}　敏DEX: ${hpmp.dex} ${_bbtn(2)}　智INT: ${hpmp.int} ${_bbtn(0)}<br>`   // 有加点→显示 + 按钮
-        : `力STR: ${hpmp.str}　敏DEX: ${hpmp.dex}　智INT: ${hpmp.int}<br>`)
-    + expLine + `<br>`
-    + `善恶: ${hpmp.alignment}　名望: ${hpmp.fame}<br>`
-    + `金钱: ${hpmp.gold}` + (hpmp.bonus != null ? `　加点: ${hpmp.bonus}` : "");
-}
+// 角色信息面板 + 加点已抽到 src/systems/charpanel.js。注入 hpmp/连接/种族/名字/log。
+const charpanel = createCharPanel({ getHpmp: () => hpmp, getGws: () => gws, getRace: () => myRace, getName: () => myCharName, log });
 window.addEventListener("keydown", (e) => {
   if (e.target && e.target.tagName === "INPUT") return;          // 聊天/输入聚焦时不触发
-  if (e.key === "c" || e.key === "C") { const d = ensureCharPanel(); d.style.display = d.style.display === "none" ? "block" : "none"; updateCharPanel(); }
+  if (e.key === "c" || e.key === "C") { charpanel.toggle(); }
   else if (e.key === "i" || e.key === "I") { const ui = ensureInvUI(); if (ui) ui.toggle(); }   // 背包/装备开关
   else if (e.key === "Escape") { if (skillBar) skillBar.disarm(); if (renderer) renderer.armSkill(null); }   // 取消技能装填
   else if (/^F[1-8]$/.test(e.key)) { e.preventDefault(); if (skillBar) skillBar.armByIndex(+e.key.slice(1) - 1); }   // F1~F8 装填技能
@@ -578,8 +547,8 @@ function onGamePacket(p) {
   else if (p.name === "GC_SKILL_TO_OBJECT_OK_2" || p.name === "GC_SKILL_TO_OBJECT_OK_4" || p.name === "GC_SKILL_TO_OBJECT_OK_5") { if (p.targetID) onSkillHit(p.targetID, p.skillType); }   // 他人技能(广播): 目标身上播效果
   else if (p.name === "GC_SKILL_FAILED_1") { log("◀ 技能失败(距离/冷却/未命中)", "err"); if (renderer) renderer.floatOnPlayer("未命中", "#ddd"); if (skillBar) skillBar.disarm(); if (renderer) renderer.armSkill(null); }   // 我的技能失败→飘字+取消装填
   else if (p.name === "GC_CREATURE_DIED") { const e = renderer._others && renderer._others.get(p.objectID); if (e) renderer.killOther(p.objectID); else death.onDeath(); }   // 死者: 视野内他人→死亡动画; 否则(可能是我)→死亡(HP≤0 已主判)
-  else if (p.name === "GC_USE_BONUS_POINT_OK") { _pendingBonus = null; }                                   // 加点成功(已乐观, 属性走 GC_MODIFY_INFORMATION)
-  else if (p.name === "GC_USE_BONUS_POINT_FAIL") { if (_pendingBonus) { hpmp.bonus++; hpmp[_pendingBonus.attr]--; _pendingBonus = null; updateCharPanel(); log("加点失败", "err"); } }
+  else if (p.name === "GC_USE_BONUS_POINT_OK") { charpanel.onBonusOk(); }                                  // 加点成功(已乐观, 属性走 GC_MODIFY_INFORMATION)
+  else if (p.name === "GC_USE_BONUS_POINT_FAIL") { charpanel.onBonusFail(); }                              // 加点失败→回滚+提示
   // ── 其他玩家可见(三族, 各自精灵包) ──
   else if (p.name === "GC_ADD_SLAYER" || p.name === "GC_ADD_VAMPIRE" || p.name === "GC_ADD_OUSTERS") { addOtherPlayer(p.creature); }
   else if (p.name === "GC_ADD_MONSTER" || p.name === "GC_ADD_NPC") { addCreature(p.creature); }   // 怪物/NPC 进入视野
