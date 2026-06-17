@@ -28,6 +28,18 @@ export class HudHpBar {
     this._render();
   }
 
+  // 金币显示(血条下方一行)。开源金钱在背包/状态; 这里给个 HUD 常驻读数(千分位)。
+  setGold(gold) {
+    if (!this.canvas) return;
+    if (!this._goldEl) {
+      const g = document.createElement("div");
+      const top = parseInt(this.canvas.style.top) + this.canvas.height * 2 + 4;
+      g.style.cssText = `position:absolute;left:14px;top:${top}px;z-index:18;color:#ffd34d;font:bold 13px/1 system-ui;text-shadow:0 1px 2px #000,0 0 3px #000;pointer-events:none;`;
+      this.container.appendChild(g); this._goldEl = g;
+    }
+    this._goldEl.textContent = "🪙 " + (gold || 0).toLocaleString("en-US");
+  }
+
   _render() {
     if (!this.pack) return;
     const p = this.pack, ctx = this.ctx;

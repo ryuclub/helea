@@ -385,8 +385,9 @@ function updateHud() {
   if (!hudBar && !hudLoading && myRace) {        // 首次(入世后): 按本族加载真实血条美术
     hudLoading = true;
     hudBar = new HudHpBar($("game"));
-    hudBar.load(myRace).then(() => hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax)).catch((e) => { log("HUD 加载失败: " + e.message, "err"); hudBar = null; });
+    hudBar.load(myRace).then(() => { hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax); hudBar.setGold(hpmp.gold); }).catch((e) => { log("HUD 加载失败: " + e.message, "err"); hudBar = null; });
   } else if (hudBar) hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax);
+  if (hudBar) hudBar.setGold(hpmp.gold);          // 金币读数(血条下方)
   if (skillBar) skillBar.setMP(hpmp.mp);          // MP 变化 → 技能栏置灰不可释放的技能
 }
 
