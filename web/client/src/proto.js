@@ -611,6 +611,30 @@ function readPCListOusters(r) {
   return { slot, race: "ousters", nameBytes: nb, name: gbkDecode(nb), sex };
 }
 
+// GC_SKILL_INFO(361, 明文, 入世下发技能列表) —— 三族子结构不同(忠实开源 GCSkillInfo/各 SkillInfo write 顺序)。
+//   主包: PCType u8 + ListNum u8(组数) + ListNum×组。组内按 PCType:
+//   Slayer(0): bLearnNewSkill u8 + DomainType u8 + n u8 + n×{SkillType u16,Exp u32,ExpLevel u16,Interval u32,CastingTime u32,Enable u8}(17B)
+//   Vampire(1): bLearnNewSkill u8 + n u8 + n×{SkillType u16,Interval u32,CastingTime u32}(10B)
+//   Ousters(2): bLearnNewSkill u8 + n u8 + n×{SkillType u16,ExpLevel u16,Interval u32,CastingTime u32}(12B)
+// 输出: { pcType, race, skills:[{skillType,enable,interval,castingTime,expLevel,exp,domain}] }(拍平供技能栏用)。
+function readSkillInfo(r) {
+  const pcType = r.u8(); const groups = r.u8(); const skills = [];
+  const race = pcType === 0 ? "slayer" : pcType === 1 ? "vampire" : "ousters";
+  for (let g = 0; g < groups; g++) {
+    r.u8();                                   // bLearnNewSkill(可学新技能, UI 提示用, 暂忽略)
+    const domain = pcType === 0 ? r.u8() : -1; // 仅 Slayer 有技能域(DomainType)
+    const n = r.u8();
+    for (let i = 0; i < n; i++) {
+      const sk = { skillType: r.u16(), domain };
+      if (pcType === 0) { sk.exp = r.u32(); sk.expLevel = r.u16(); sk.interval = r.u32(); sk.castingTime = r.u32(); sk.enable = r.u8() !== 0; }
+      else if (pcType === 1) { sk.interval = r.u32(); sk.castingTime = r.u32(); sk.enable = true; }
+      else { sk.expLevel = r.u16(); sk.interval = r.u32(); sk.castingTime = r.u32(); sk.enable = true; }
+      skills.push(sk);
+    }
+  }
+  return { pcType, race, skills };
+}
+
 // ---- 解码(S→C) ----
 export function decode(u8) {
   const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
@@ -657,6 +681,7 @@ export function decode(u8) {
     else if (id === PACKET.GC_ADD_SLAYER) { out.creature = readSlayerInfo(r); }
     else if (id === PACKET.GC_ADD_VAMPIRE) { out.creature = readVampOustInfo(r, "vampire"); }
     else if (id === PACKET.GC_ADD_OUSTERS) { out.creature = readVampOustInfo(r, "ousters"); }
+    else if (id === PACKET.GC_SKILL_INFO) { const si = readSkillInfo(r); out.pcType = si.pcType; out.race = si.race; out.skills = si.skills; }
     else if (id === PACKET.GC_ADD_MONSTER) { out.creature = readMonster(r); }
     else if (id === PACKET.GC_ADD_NPC) { out.creature = readNPC(r); }
     // 近战命中确认(给攻击者): TargetObjectID + ModifyInfo(攻击者自身属性变化, short{type,value u16}+long{type,value u32})
