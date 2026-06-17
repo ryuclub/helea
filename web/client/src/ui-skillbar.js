@@ -58,7 +58,8 @@ export class SkillBar {
     const sk = i >= 0 ? this.skills[i] : null;
     if (sk) {
       const cd = sk.interval ? `<div style="color:#9c9;font-size:11px">冷却 ${(sk.interval / 1000).toFixed(1)}s${sk.castingTime ? ` · 吟唱 ${(sk.castingTime / 1000).toFixed(1)}s` : ""}</div>` : "";
-      this.tip.innerHTML = `<div style="color:#ffd87a;font-weight:600">${sk.n}</div><div style="color:#9c9;font-size:11px">${sk.e}</div>${cd}<div style="color:#c9b070;font-size:11px;margin-top:2px">点击装填, 再点怪释放</div>`;
+      const mp = sk.mp ? `<div style="color:#8cf;font-size:11px">MP ${sk.mp}</div>` : "";
+      this.tip.innerHTML = `<div style="color:#ffd87a;font-weight:600">${sk.n}</div><div style="color:#9c9;font-size:11px">${sk.e}</div>${mp}${cd}<div style="color:#c9b070;font-size:11px;margin-top:2px">${i < 8 ? `F${i + 1} 或` : ""}点击装填, 再点怪释放</div>`;
       this.tip.style.left = (e.clientX - 232) + "px"; this.tip.style.top = (e.clientY - 30) + "px"; this.tip.style.display = "block";
     } else this._hideTip();
   }
@@ -71,6 +72,8 @@ export class SkillBar {
     this._render();
   }
   disarm() { if (this.armed !== -1) { this.armed = -1; this._render(); } }   // 外部(释放完/Esc)取消高亮
+  // 热键 F1~F8 装填第 i 槽(同点击: 再按取消)。无该槽则忽略。
+  armByIndex(i) { if (i < 0 || i >= this.skills.length) return; if (this.armed === i) { this.armed = -1; if (this.onArm) this.onArm(null); } else { this.armed = i; if (this.onArm) this.onArm(this.skills[i]); } this._render(); }
 
   _render() {
     if (!this.cv) return; const ctx = this.ctx, W = this.cv.width, H = this.cv.height;
@@ -84,6 +87,16 @@ export class SkillBar {
       ctx.lineWidth = this.armed === i ? 2 : 1;
       ctx.strokeStyle = this.armed === i ? "#ffe070" : (this.hover === i ? "#ffe8a0" : "#6b5a38");
       ctx.strokeRect(sx + 0.5, sy + 0.5, CELL - 1, CELL - 1);
+      if (i < 8) {                                                 // 热键标签 F1~F8(左上角)
+        ctx.font = "8px monospace"; ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillText("F" + (i + 1), sx + 2, sy + 2);
+        ctx.fillStyle = "#cfae6a"; ctx.fillText("F" + (i + 1), sx + 1, sy + 1);
+      }
+      if (sk.mp) {                                                 // MP 角标(右下)
+        ctx.font = "8px monospace"; ctx.textAlign = "right"; ctx.textBaseline = "bottom";
+        ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillText(sk.mp, sx + CELL - 1, sy + CELL);
+        ctx.fillStyle = "#8cf"; ctx.fillText(sk.mp, sx + CELL - 2, sy + CELL - 1);
+      }
     }
   }
 }

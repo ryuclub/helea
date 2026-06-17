@@ -44,8 +44,11 @@ function parseTable(src) {
     const name = m[1], eng = m[2], sprite = parseInt(m[3], 10), gbkRaw = m[4];
     if (name === "i") continue;                                  // 跳过循环占位
     const bytes = Uint8Array.from([...gbkRaw].map((c) => c.charCodeAt(0) & 0xff));
-    out.set(name, { sprite, eng, name: gbk.decode(bytes) });
+    out.set(name, { sprite, eng, name: gbk.decode(bytes), mp: 0 });
   }
+  // MP 消耗: m_pTypeInfo[NAME].SetMP( N )
+  const reMP = /m_pTypeInfo\[\s*([A-Za-z_]\w*)\s*\]\.SetMP\(\s*(\d+)\s*\)/g;
+  while ((m = reMP.exec(src))) { const e = out.get(m[1]); if (e) e.mp = parseInt(m[2], 10); }
   return out;
 }
 
@@ -65,7 +68,7 @@ for (const [name, info] of table) {
   if (enumMap.has(name)) st = enumMap.get(name);
   else { const cand = enumNorm.get(norm(name)); if (cand && cand.length === 1) { st = enumMap.get(cand[0]); fuzzy++; } }
   if (st === null) { onlyTable++; continue; }
-  if (!(st in result)) { result[st] = { s: info.sprite, n: info.name, e: info.eng }; joined++; }
+  if (!(st in result)) { result[st] = { s: info.sprite, n: info.name, e: info.eng, mp: info.mp || 0 }; joined++; }
 }
 
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
