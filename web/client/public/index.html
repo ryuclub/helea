@@ -765,9 +765,10 @@ function onGamePacket(p) {
   else if (p.name === "GC_ATTACK_MELEE_OK_1") {   // 我命中确认: 自身ModifyInfo(经验/属性/HP) → 状态
     applyMods(p.mods);
   }
-  else if (p.name === "GC_ATTACK_MELEE_OK_2") {   // 我被怪攻击: ModifyInfo 含我方HP变化 → 状态; 攻击者播攻击动画
+  else if (p.name === "GC_ATTACK_MELEE_OK_2") {   // 我被怪攻击: ModifyInfo 含我方HP变化(applyMods 飘字-N) + 攻击者播攻击动画 + 我受击泛红
     applyMods(p.mods);
     renderer.otherAttack(p.objectID);
+    if (player) renderer.flashHit(player);
   }
   else if (p.name === "GC_ATTACK_MELEE_OK_3") { renderer.otherAttack(p.objectID); }        // 旁观: 攻击者播攻击动画
   // 被击者新HP→血条+伤害飘字。服务端 broadcast 已排除被击者本人, 故只会是视野内的怪/他人(自身HP走 GC_MODIFY_INFORMATION)。

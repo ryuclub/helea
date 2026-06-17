@@ -405,7 +405,7 @@ void main(){
     const e = this._others.get(objectID); if (!e || e.dying) return;
     const dmg = Math.max(0, (e.hp ?? newHP) - newHP);
     e.hp = newHP;
-    if (dmg > 0) this.floatText(e, "-" + dmg, "#f55");
+    if (dmg > 0) { this.floatText(e, "-" + dmg, "#f55"); this.flashHit(e); }   // 命中反馈: 飘字+泛红
     if (newHP <= 0) this.killOther(objectID);              // HP 归零 → 死亡动画(先于尸体包)
   }
   // 在某实体头顶飘一条文字(伤害/治疗/Miss)。entity 可为 player 或 _others 项; 缺省 player。
@@ -415,6 +415,15 @@ void main(){
   }
   // 在玩家自己头顶飘字(被击 -N / 治疗 +N / Miss)。
   floatOnPlayer(text, color) { this.floatText(this.player, text, color); }
+  // 受击闪烁: 精灵短暂泛红(emissive), ~140ms 恢复。用于被击/命中反馈。
+  flashHit(entity) {
+    const e = entity || this.player; if (!e) return;
+    const planes = e.planes || [{ mat: e.mat }];
+    const B = BABYLON;
+    for (const pl of planes) if (pl.mat) pl.mat.emissiveColor = new B.Color3(1, 0.35, 0.35);
+    clearTimeout(e._flashT);
+    e._flashT = setTimeout(() => { if (e.dying) return; for (const pl of planes) if (pl.mat) pl.mat.emissiveColor = new B.Color3(1, 1, 1); }, 140);
+  }
   // 他人移动 GC_MOVE(282): 平滑步进到 (nc,nr), 朝向 dir。
   otherStep(objectID, nc, nr, dir) {
     const e = this._others.get(objectID); if (!e) return;
