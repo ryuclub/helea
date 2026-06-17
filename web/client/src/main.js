@@ -7,7 +7,7 @@ import { parseCFPK, getActionSeqs } from "./cfpk.js";
 import { loadSpritesById, fetchBuf } from "./pack.js";
 import { loadLevelUpEffect, loadEffectByStatus } from "./effect.js";
 import { RACE_SPRITE_PACK, raceActions, raceFrameID } from "./creature-anim.js";
-import { initTerrain, buildBlock, buildZoneObjects } from "./terrain.js";
+import { createZoneSystem } from "./systems/zone.js";
 import { LoginScreen } from "./ui-login.js";
 import { CharSelectScreen } from "./ui-charselect.js";
 import { CharCreateScreen } from "./ui-charcreate.js";
@@ -82,56 +82,8 @@ chatEl.addEventListener("keydown", (e) => {
   else log("(未进入游戏, 无法发言)", "err");
 });
 
-// zoneID → 地图文件名(从 DB ZoneInfo 生成, 148 区)。换区时按真实 zone 加载对应地图。
-let ZONEMAP = {};
-(async () => { try { ZONEMAP = await (await fetch("/public/assets/zonemap.json")).json(); } catch (e) { log("zonemap 加载失败: " + e.message, "err"); } })();
-let curZone = null, terrainMapName = null;
-// 换区转场(几乎无黑屏, 视觉=旧界面淡出/新界面淡入): 换区瞬间抓取旧画面截图盖在最上层(瞬时, 冻住旧场景),
-// 在其底下静默清旧区/载新区, 新区就绪后把这张旧截图淡出 → 露出新场景。token 防快速连换时旧淡出误盖新一轮。
-let _fadeToken = 0, _busyTimer = 0;
-function coverWithOldFrame() {
-  _fadeToken++; const tok = _fadeToken;
-  const el = $("zoneFade");
-  try {                                                    // 抓当前(旧)画面盖住; canvas 开了 preserveDrawingBuffer
-    el.style.backgroundImage = `url(${$("cv").toDataURL()})`; el.style.backgroundColor = "#000";
-  } catch { el.style.backgroundImage = "none"; el.style.backgroundColor = "#000"; } // 抓取失败回退黑幕
-  el.classList.remove("busy");
-  el.style.transition = "none";                            // 立即盖住(无淡入), 看起来就是旧画面没动
-  el.style.display = "block"; el.style.opacity = "1";
-  void el.offsetWidth;                                     // 重排固化, 再恢复过渡供之后淡出
-  el.style.transition = "opacity .45s ease";
-  clearTimeout(_busyTimer);                                // 加载超 450ms 才浮出 spinner(短转场不打扰; 解码已分片故能转)
-  _busyTimer = setTimeout(() => { if (tok === _fadeToken) el.classList.add("busy"); }, 450);
-}
-function fadeInWhenReady() {
-  const tok = _fadeToken, t0 = performance.now();
-  const tick = () => {
-    if (tok !== _fadeToken) return;                        // 又换区了 → 交给新一轮
-    // 新区中心块已渲染(+短暂沉淀让附近物件补齐)才淡出旧截图; 8s 兜底。
-    if ((renderer.isFocusBlockReady() && performance.now() - t0 > 150) || performance.now() - t0 > 8000) {
-      clearTimeout(_busyTimer);
-      const el = $("zoneFade"); el.classList.remove("busy"); el.style.opacity = "0";
-      setTimeout(() => { if (tok === _fadeToken) { el.style.display = "none"; el.style.backgroundImage = "none"; } }, 480);
-      return;
-    }
-    requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
-}
-// 按 zoneID 加载对应地图(换图: tile/obj 全局库, 仅 .map 不同)。zone 变了则清旧区块再载。
-async function initTerrainForZone(zoneID, fx, fy) {
-  const mapName = ZONEMAP[zoneID] || "eslania_NW";
-  if (terrainMapName === mapName) { renderer.setFocus(fx, fy); return; }
-  if (terrainMapName !== null) { coverWithOldFrame(); renderer.clearBlocks(); }  // 换区: 用旧画面截图盖住(冻住旧场景), 再清旧区+载新区
-  const t0 = performance.now();
-  const map = await initTerrain({ mapUrl: `/public/assets/map/${mapName}.map`, tileBase: "/public/assets/tile", objBase: "/public/assets/obj" });
-  renderer.setMap(map).setBlockLoader(buildBlock).setFocus(fx, fy);
-  // 物件整区常驻(对齐开源 MTopView): 进区一次性载入本 zone 全部物件, 按 viewpoint 画家序绘制,
-  // 绝不按块分桶/加载半径丢弃 → 杜绝"该有物件却黑洞"。
-  renderer.loadZoneObjects(await buildZoneObjects());
-  terrainMapName = mapName;
-  log(`地形就绪: ${mapName}(zone${zoneID}) ${map.width}x${map.height} (${(performance.now() - t0 | 0)}ms)`, "ok");
-}
+// 换区/地形系统已抽到 src/systems/zone.js(转场/ZONEMAP/当前zone 内聚)。注入 renderer/log; 异步载入 zonemap。
+const zone = createZoneSystem({ renderer, log }); zone.loadZoneMap();
 
 // 角色/怪物/NPC 素材加载 + 生物高度表已抽到 src/systems/asset-loader.js(朝 ECS/愿景④素材封装形状)。
 // buildRaceAssets / loadCreatureAssets / ensureCreatureInfo / playerHeight / monsterHeight 从该模块 import。
@@ -142,13 +94,13 @@ let player = null, gws = null, placing = false, pendingPlace = null;
 // 旧实现 `if(placing)return` 会**丢弃**后续换区 → 角色没放到新图、新旧地块混杂。改为"最新目标胜出":
 // 加载中再来请求只记下最新目标, 当前加载完接着处理它; 加载途中目标又变则跳过本次定位、重载最新。
 async function placePlayerAt(x, y) {
-  pendingPlace = { x, y, zone: curZone || (RACE_START_ZONE[myRace] || 12) };
+  pendingPlace = { x, y, zone: zone.getCurZone() || (RACE_START_ZONE[myRace] || 12) };
   if (placing) return;                                       // 已有加载循环在跑, 它会接手最新 pendingPlace
   placing = true;
   try {
     while (pendingPlace) {
       const t = pendingPlace; pendingPlace = null;
-      await initTerrainForZone(t.zone, t.x, t.y);            // 按 zone 加载/换图(同图名早返回, 不同则清旧载新)
+      await zone.initForZone(t.zone, t.x, t.y);              // 按 zone 加载/换图(同图名早返回, 不同则清旧载新)
       if (pendingPlace) continue;                            // 加载期间又来新换区 → 本次定位作废, 去处理最新
       if (!player) {
         const { frames, anim, parts } = await buildRaceAssets(myRace, mySex, gearItems);   // 装备多部位合成(身体+武器+护甲...) + 攻击动作随右手武器
@@ -175,7 +127,7 @@ async function placePlayerAt(x, y) {
         log(`到达 zone${t.zone} (${t.x},${t.y})`, "ok");
       }
       renderer.markZoneReady();   // 新区地图+物件+玩家全部就位 → 开启地砖流式(换区原子门, 防旧区污染)
-      fadeInWhenReady();          // 新区中心块渲染好 → 淡出黑幕露出新场景
+      zone.fadeInWhenReady();     // 新区中心块渲染好 → 淡出黑幕露出新场景
       reconnectTries = 0;
     }
   } catch (e) {
@@ -519,7 +471,7 @@ function onGamePacket(p) {
     if (p.inventory) { invCursorItem = null; invCursorFrom = null; if (invUI) invUI.clearCursor(); invItems = p.inventory; gearItems = p.gear || []; ensureInvUI(); ensureQuickBar(); refreshInv(); }  // 入世/换区: 全量背包+装备, 清光标
     groundItems = {};                                                                                      // 换区: 清地面物数据(plane 由 renderer.clearGroundItems 清)
     // 真实 zone: 从包解析(三族均对真实包核对)。决定加密 code + 加载哪张图(含传送换区)。
-    const parsed = (p.zoneID && ZONEMAP[p.zoneID]) ? p.zoneID : null;
+    const parsed = zone.hasZone(p.zoneID) ? p.zoneID : null;
     if (parsed === null && player) {
       // 已在世却解析不出新 zone(极少见: 解析异常): 用错 code 会崩服 → 主动断开, 不自动重连(避免循环)。
       log("⚠ 无法解析新区域, 已断开以避免错误, 请手动刷新重进", "err");
@@ -527,9 +479,9 @@ function onGamePacket(p) {
     }
     const z = parsed || (RACE_START_ZONE[myRace] || 12);
     const tx = (p.zoneX ?? SPAWN_COL), ty = (p.zoneY ?? SPAWN_ROW);  // 换区临时落点(开源 SetX/Y(zoneX,zoneY))
-    curZone = z;
+    zone.setCurZone(z);
     setEncryptCode(calcEncryptCode(z, 0));
-    log(`◀ GC_UPDATE_INFO 原始zoneID=${p.zoneID} → zone${z}(${tx},${ty})${parsed ? "" : "(不在ZONEMAP→回退!)"} 图=${ZONEMAP[z] || "?"} code${calcEncryptCode(z, 0)}`, parsed ? "ok" : "err");
+    log(`◀ GC_UPDATE_INFO 原始zoneID=${p.zoneID} → zone${z}(${tx},${ty})${parsed ? "" : "(不在ZONEMAP→回退!)"} 图=${zone.getZoneName(z) || "?"} code${calcEncryptCode(z, 0)}`, parsed ? "ok" : "err");
     // 开源标准: GC_UPDATE_INFO 即 MoveZone —— 先卸旧图载新图(用临时坐标 zoneX/zoneY 落位/聚焦),
     // 图就绪后才发 CGReady(服务器随后才发 GC_SET_POSITION 定最终位置)。地形重载绝不放到 SET_POSITION。
     placePlayerAt(tx, ty).then(() => { if (gws && gws.readyState === 1) gws.send(encCGReady()); });
