@@ -387,6 +387,7 @@ function updateHud() {
     hudBar = new HudHpBar($("game"));
     hudBar.load(myRace).then(() => hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax)).catch((e) => { log("HUD 加载失败: " + e.message, "err"); hudBar = null; });
   } else if (hudBar) hudBar.set(hpmp.hp, hpmp.hpMax, hpmp.mp, hpmp.mpMax);
+  if (skillBar) skillBar.setMP(hpmp.mp);          // MP 变化 → 技能栏置灰不可释放的技能
 }
 
 // GC_UPDATE_INFO 全量字段 → 角色状态(三族经验/等级/属性, proto.js 已逐字段解析)。
@@ -566,7 +567,7 @@ function ensureQuickBar() {
 let skillBar = null, skillEffectSeq = 0;
 function ensureSkillBar() {
   if (skillBar) return skillBar;
-  skillBar = new SkillBar($("game"));
+  skillBar = new SkillBar($("game")); window.__skillbar = skillBar;
   skillBar.setArmHandler((skill) => {                                          // 装填/取消 → 渲染器 armedSkill
     if (renderer) renderer.armSkill(skill);
     log(skill ? `▶ 装填技能「${skill.n}」, 点怪释放` : "技能已取消", skill ? "ok" : "info");

@@ -8,8 +8,11 @@ import { loadUIPack } from "./uispk.js";
 const SCALE = 1.4, CELL = 36, GAP = 4, PAD = 5;
 
 export class SkillBar {
-  constructor(container) { this.container = container; this.skills = []; this.hover = -1; this.armed = -1; this.pack = null; this.info = {}; }
+  constructor(container) { this.container = container; this.skills = []; this.hover = -1; this.armed = -1; this.pack = null; this.info = {}; this.curMP = Infinity; }
   setArmHandler(fn) { this.onArm = fn; }          // (skill|null) → 装填/取消(renderer 记 armedSkill)
+  _afford(sk) { return !sk.mp || sk.mp <= this.curMP; }   // MP 是否够(0消耗恒可用)
+  // 当前 MP 变化 → 重绘(MP 不足的技能置灰); 若已装填技能变得不够则取消装填。
+  setMP(mp) { this.curMP = (mp == null ? Infinity : mp); if (this.armed >= 0 && !this._afford(this.skills[this.armed])) { this.armed = -1; if (this.onArm) this.onArm(null); } if (this.cv) this._render(); }
 
   // 异步加载图标包 + 技能信息表(只一次)。
   async load() {
@@ -68,21 +71,23 @@ export class SkillBar {
   _click(e) {
     const { x, y } = this._evt(e); const i = this._slotAt(x, y); if (i < 0) return;
     if (this.armed === i) { this.armed = -1; if (this.onArm) this.onArm(null); }   // 再点同槽 → 取消装填
-    else { this.armed = i; if (this.onArm) this.onArm(this.skills[i]); }
+    else { if (!this._afford(this.skills[i])) return; this.armed = i; if (this.onArm) this.onArm(this.skills[i]); }   // MP 不足不可装填
     this._render();
   }
   disarm() { if (this.armed !== -1) { this.armed = -1; this._render(); } }   // 外部(释放完/Esc)取消高亮
   // 热键 F1~F8 装填第 i 槽(同点击: 再按取消)。无该槽则忽略。
-  armByIndex(i) { if (i < 0 || i >= this.skills.length) return; if (this.armed === i) { this.armed = -1; if (this.onArm) this.onArm(null); } else { this.armed = i; if (this.onArm) this.onArm(this.skills[i]); } this._render(); }
+  armByIndex(i) { if (i < 0 || i >= this.skills.length) return; if (this.armed === i) { this.armed = -1; if (this.onArm) this.onArm(null); } else { if (!this._afford(this.skills[i])) return; this.armed = i; if (this.onArm) this.onArm(this.skills[i]); } this._render(); }
 
   _render() {
     if (!this.cv) return; const ctx = this.ctx, W = this.cv.width, H = this.cv.height;
     ctx.clearRect(0, 0, W, H);
     for (let i = 0; i < this.skills.length; i++) {
-      const sx = PAD, sy = this._slotY(i), sk = this.skills[i];
+      const sx = PAD, sy = this._slotY(i), sk = this.skills[i], afford = this._afford(sk);
       ctx.fillStyle = "rgba(8,6,4,.9)"; ctx.fillRect(sx, sy, CELL, CELL);
       const s = this.pack && this.pack.get(sk.s);
+      ctx.globalAlpha = afford ? 1 : 0.35;                        // MP 不足: 图标变暗
       if (s && s.width) { try { this.pack.blit(ctx, (sx + (CELL - s.width) / 2) | 0, (sy + (CELL - s.height) / 2) | 0, sk.s); } catch {} }
+      ctx.globalAlpha = 1;
       // 边框: 装填=亮金粗框, 悬停=亮金, 否则暗金
       ctx.lineWidth = this.armed === i ? 2 : 1;
       ctx.strokeStyle = this.armed === i ? "#ffe070" : (this.hover === i ? "#ffe8a0" : "#6b5a38");
@@ -92,10 +97,10 @@ export class SkillBar {
         ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillText("F" + (i + 1), sx + 2, sy + 2);
         ctx.fillStyle = "#cfae6a"; ctx.fillText("F" + (i + 1), sx + 1, sy + 1);
       }
-      if (sk.mp) {                                                 // MP 角标(右下)
+      if (sk.mp) {                                                 // MP 角标(右下; 不足标红)
         ctx.font = "8px monospace"; ctx.textAlign = "right"; ctx.textBaseline = "bottom";
         ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillText(sk.mp, sx + CELL - 1, sy + CELL);
-        ctx.fillStyle = "#8cf"; ctx.fillText(sk.mp, sx + CELL - 2, sy + CELL - 1);
+        ctx.fillStyle = afford ? "#8cf" : "#f66"; ctx.fillText(sk.mp, sx + CELL - 2, sy + CELL - 1);
       }
     }
   }
