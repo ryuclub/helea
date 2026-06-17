@@ -12,6 +12,12 @@
 const DEPTH_EPS = 0.01;       // 每像素 z 步进(相邻行差 tileH*EPS ≈ 0.24, 深度缓冲足够分辨)
 const DEPTH_GROUND = 1;       // 地面恒在所有物件之后
 const depthZ = (baseY) => -baseY * DEPTH_EPS;
+// 精灵主体顶行 y(贴图上方 padding + 跳过武器/头发稀疏尖端): 名字/血条贴"视觉主体头顶"而非贴图几何顶或尖端。
+function _topOpaqueRow(rgba, w, h) {
+  const minPix = Math.max(2, w * 0.12 | 0);   // 某行非透明像素 ≥ 宽度12% 才算主体(跳过尖端单像素)
+  for (let y = 0; y < h; y++) { const base = y * w * 4; let c = 0; for (let x = 0; x < w; x++) if (rgba[base + x * 4 + 3] > 8) c++; if (c >= minPix) return y; }
+  return 0;
+}
 // 深度: 物件用 viewpoint(锚点行)、角色用所在行中点, 同基准 → 北边物件在后/南边在前(开源扇区画家),
 // 不再需要 CHAR_DEPTH_BIAS 硬偏置(已移除)。
 
@@ -298,7 +304,8 @@ void main(){
     for (const id in framesById) {
       const f = framesById[id]; if (!f) continue;
       const tx = B.RawTexture.CreateRGBATexture(f.rgba, f.width, f.height, this.scene, false, true, B.Texture.NEAREST_SAMPLINGMODE);
-      tx.hasAlpha = true; textures[id] = tx; frameMeta[id] = { w: f.width, h: f.height };
+      tx.hasAlpha = true; textures[id] = tx;
+      frameMeta[id] = { w: f.width, h: f.height, vtop: _topOpaqueRow(f.rgba, f.width, f.height) };  // vtop=非透明顶行(贴图上 padding), 名字/血条贴视觉头顶用
     }
     const plane = B.MeshBuilder.CreatePlane(name, { size: 1 }, this.scene); // 单位平面, 逐帧缩放
     const mat = new B.StandardMaterial(name + "m", this.scene);
@@ -420,7 +427,7 @@ void main(){
   _drawFrame(e, gx, gy) {
     const fr = this._curFrame(e); if (!fr) return;
     const m = e.frameMeta[fr.s]; if (!m) return;
-    e._h = m.h;                                                   // 当前精灵高(覆盖层血条/名字定位用)
+    e._h = m.h; e._vtop = m.vtop || 0;                            // 当前精灵高 + 视觉顶 padding(覆盖层血条/名字定位用)
     const cx = gx + fr.cx + m.w / 2, cy = gy + fr.cy + m.h / 2;   // 贴图中心(全局像素)
     const w = this._gw(cx, cy);
     const depthY = gy + TH / 2;                                   // 角色深度=所在行中点(开源扇区画家: 生物半行前置, 赢同行物件、被南行物件遮挡)
@@ -684,7 +691,7 @@ void main(){
     ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
     for (const e of this._others.values()) {
       if (!e.plane || e.plane.isDisposed() || !e.name) continue;
-      const headY = e.plane.position.y + (e._h || 60) / 2 + 6;     // 头顶上方一点
+      const headY = e.plane.position.y + (e._h || 60) / 2 - (e._vtop || 0) + 4;  // 视觉头顶(扣掉贴图上 padding)上方一点
       const sp = B.Vector3.Project(new B.Vector3(e.plane.position.x, headY, e.plane.position.z), B.Matrix.Identity(), tm, vpw);
       if (sp.z < 0 || sp.z > 1) continue;                          // 相机后方
       const x = sp.x; let y = sp.y;
