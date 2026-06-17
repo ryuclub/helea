@@ -547,6 +547,7 @@ void main(){
   // 服务器确认移动: 动画步进到 (nc,nr), 朝向 dir。
   serverStep(nc, nr, dir) {
     const e = this.player; if (!e) return;
+    this._awaitingMove = false;            // 确认到达即解除节流(原靠插值完成才清, 确认丢失会死锁→杀怪后无法逼近攻击)
     e.dir = dir; e.action = "move";
     e.fromCol = e.col; e.fromRow = e.row; e.toCol = nc; e.toRow = nr;
     e.stepping = true; e.t0 = performance.now();
