@@ -1,5 +1,6 @@
 // 游戏主入口(由 public/index.html 抽出, 行为不变)。各功能模块化的容器, 后续按职责继续拆分。
 import { GameRenderer } from "./render.js";
+import { createDeathSystem } from "./systems/death.js";
 import { parseCFPK, getActionSeqs } from "./cfpk.js";
 import { loadSpritesById, fetchBuf } from "./pack.js";
 import { loadLevelUpEffect, loadEffectByStatus } from "./effect.js";
@@ -16,7 +17,7 @@ import { ShopUI } from "./ui-shop.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCLQueryCharacterName, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
   encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell, encCGUsePotionFromInventory,
-  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot, encCGUseBonusPoint, encCGSkillToObject, encCGResurrect,
+  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot, encCGUseBonusPoint, encCGSkillToObject,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "./proto.js";
 import { loadItemInf, getItemInfo } from "./iteminfo.js";
 import { loadMonsterMap, loadCreatureSprite, monsterFrameID, spriteFrameID } from "./creature-sprite.js";
@@ -54,7 +55,7 @@ const KEY = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRigh
   w: [0, -1], s: [0, 1], a: [-1, 0], d: [1, 0] };
 const held = new Set();
 function applyIntent() {
-  if (isDead) { renderer.setIntent(0, 0); return; }   // 死亡(COMA): 禁止移动
+  if (death.isDead()) { renderer.setIntent(0, 0); return; }   // 死亡(COMA): 禁止移动
   let dc = 0, dr = 0;
   for (const k of held) { const m = KEY[k]; if (m) { dc += m[0]; dr += m[1]; } }
   renderer.setIntent(Math.sign(dc), Math.sign(dr));
@@ -353,7 +354,7 @@ function applyMods(mods) {
     }
   }
   if (hpmp.level > prevLevel && prevLevel > 0) showLevelUp(hpmp.level);   // ★升级瞬间反馈
-  if (hpmp.hp <= 0 && player && !isDead) onDeath();                        // ★HP 归零 → 死亡
+  if (hpmp.hp <= 0 && player && !death.isDead()) death.onDeath();          // ★HP 归零 → 死亡
   updateHud(); updateCharPanel();
 }
 
@@ -376,40 +377,8 @@ function showLevelUp(level) {
   if (player && renderer) loadLevelUpEffect(myRace).then((eff) => { if (eff) renderer.playCreatureEffect(player, eff); }).catch(() => {});
 }
 
-// 死亡与复活(忠实开源: HP≤0→COMA 死亡, 5s 后可发 CG_RESURRECT, 服务端回 GC_UPDATE_INFO 在复活点重生)。
-let isDead = false, _deathEl = null, _reviveTimer = null;
-function onDeath() {
-  if (isDead) return; isDead = true;
-  if (player && renderer) renderer.playAction("die", true);     // 角色定格死亡末帧
-  showDeathScreen();
-  log("★ 你已倒下", "err");
-}
-function showDeathScreen() {
-  if (!_deathEl) {
-    _deathEl = document.createElement("div");
-    _deathEl.style.cssText = "position:absolute;inset:0;z-index:40;background:rgba(40,0,0,.55);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;color:#ffdede;font:system-ui;text-align:center;";
-    _deathEl.innerHTML = `<div style="font:bold 40px 'Microsoft YaHei',system-ui;color:#ff5a5a;text-shadow:0 2px 8px #000">你已倒下</div>`
-      + `<div id="reviveHint" style="font-size:15px;color:#e8b0b0"></div>`
-      + `<button id="reviveBtn" style="margin-top:6px;padding:9px 26px;font:bold 16px system-ui;color:#fff;background:#7a1414;border:1px solid #c66;border-radius:6px;cursor:pointer">复活</button>`;
-    $("game").appendChild(_deathEl);
-    _deathEl.querySelector("#reviveBtn").addEventListener("click", doResurrect);
-  }
-  _deathEl.style.display = "flex";
-  let left = 5; const hint = _deathEl.querySelector("#reviveHint"), btn = _deathEl.querySelector("#reviveBtn");
-  btn.disabled = true; btn.style.opacity = ".5";
-  hint.textContent = `${left} 秒后可复活…`;
-  clearInterval(_reviveTimer);
-  _reviveTimer = setInterval(() => {
-    if (--left <= 0) { clearInterval(_reviveTimer); hint.textContent = "点击复活返回复活点"; btn.disabled = false; btn.style.opacity = "1"; }
-    else hint.textContent = `${left} 秒后可复活…`;
-  }, 1000);
-}
-function doResurrect() { if (gws && gws.readyState === 1) gws.send(encCGResurrect()); log("▶ 请求复活", "ok"); }   // 服务端回 GC_UPDATE_INFO 完成重生
-function reviveCleanup() {   // 收到 GC_UPDATE_INFO(复活/换区)时调用: 清死亡态
-  if (!isDead) return; isDead = false; clearInterval(_reviveTimer);
-  if (_deathEl) _deathEl.style.display = "none";
-  if (player) { player.oneShot = null; player.frameOverride = null; player.action = "stand"; player.animIdx = 0; }
-}
+// 死亡与复活系统已抽到 src/systems/death.js(朝 ECS"系统"形状)。注入 renderer/玩家/连接/log。
+const death = createDeathSystem({ renderer, getPlayer: () => player, getGws: () => gws, log });
 
 // 技能命中目标 → 在目标身上播命中效果(复用升级特效那套 efpk/aspk: status→effect)。
 //   开源链路: skillType → g_pActionInfoTable[skillType].GetEffectStatus() → EFFECTSTATUS → loadEffectByStatus。
@@ -650,7 +619,7 @@ function firstFreeInvSlot(item) {
 
 function onGamePacket(p) {
   if (p.name === "GC_UPDATE_INFO") {
-    reviveCleanup();                                                                                       // 复活/换区: 清死亡态(满血在复活点重生)
+    death.reviveCleanup();                                                                                 // 复活/换区: 清死亡态(满血在复活点重生)
     if (p.curHP !== undefined) { hpmp.hp = p.curHP; hpmp.hpMax = p.maxHP || 1; hpmp.mp = p.curMP; hpmp.mpMax = p.maxMP || 1; updateHud(); applyCharFull(p); }
     if (p.inventory) { invCursorItem = null; invCursorFrom = null; if (invUI) invUI.clearCursor(); invItems = p.inventory; gearItems = p.gear || []; ensureInvUI(); ensureQuickBar(); refreshInv(); }  // 入世/换区: 全量背包+装备, 清光标
     groundItems = {};                                                                                      // 换区: 清地面物数据(plane 由 renderer.clearGroundItems 清)
@@ -682,7 +651,7 @@ function onGamePacket(p) {
   else if (p.name === "GC_SKILL_TO_OBJECT_OK_1") { applyMods(p.mods); onSkillHit(p.targetID, p.skillType, p.effectID); log(`◀ 技能命中 #${p.targetID}`, "ok"); }   // 我命中: 自身ModifyInfo(经验/HP)+目标效果(怪HP走 setCreatureHP 飘字)
   else if (p.name === "GC_SKILL_TO_OBJECT_OK_2" || p.name === "GC_SKILL_TO_OBJECT_OK_4" || p.name === "GC_SKILL_TO_OBJECT_OK_5") { if (p.targetID) onSkillHit(p.targetID, p.skillType); }   // 他人技能(广播): 目标身上播效果
   else if (p.name === "GC_SKILL_FAILED_1") { log("◀ 技能失败(距离/冷却/未命中)", "err"); if (renderer) renderer.floatOnPlayer("未命中", "#ddd"); if (skillBar) skillBar.disarm(); if (renderer) renderer.armSkill(null); }   // 我的技能失败→飘字+取消装填
-  else if (p.name === "GC_CREATURE_DIED") { const e = renderer._others && renderer._others.get(p.objectID); if (e) renderer.killOther(p.objectID); else onDeath(); }   // 死者: 视野内他人→死亡动画; 否则(可能是我)→死亡(HP≤0 已主判)
+  else if (p.name === "GC_CREATURE_DIED") { const e = renderer._others && renderer._others.get(p.objectID); if (e) renderer.killOther(p.objectID); else death.onDeath(); }   // 死者: 视野内他人→死亡动画; 否则(可能是我)→死亡(HP≤0 已主判)
   else if (p.name === "GC_USE_BONUS_POINT_OK") { _pendingBonus = null; }                                   // 加点成功(已乐观, 属性走 GC_MODIFY_INFORMATION)
   else if (p.name === "GC_USE_BONUS_POINT_FAIL") { if (_pendingBonus) { hpmp.bonus++; hpmp[_pendingBonus.attr]--; _pendingBonus = null; updateCharPanel(); log("加点失败", "err"); } }
   // ── 其他玩家可见(三族, 各自精灵包) ──
@@ -927,8 +896,8 @@ window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreatur
   qbTest: (gear) => { const q = ensureQuickBar(); q.setGear(gear); return q; },                // 验证用: 喂假腰带 gear 测快捷栏
   applyMods,                                                                                    // 验证用: 测升级检测
   skillTest: (skills) => ensureSkillBar().setSkills(skills || [5, 6, 7, 8, 9, 154, 155].map((skillType, i) => ({ skillType, enable: true, interval: 2000 + i * 500, castingTime: i % 2 ? 800 : 0 }))),  // 验证用: 喂假技能列表测技能栏
-  deathTest: () => showDeathScreen(),                                                            // 验证用: 显示死亡画面(不需真死)
-  reviveTest: () => reviveCleanup(),                                                             // 验证用: 清死亡态
+  deathTest: () => death.showDeathScreen(),                                                      // 验证用: 显示死亡画面(不需真死)
+  reviveTest: () => death.reviveCleanup(),                                                       // 验证用: 清死亡态
   spawnTest: async () => { const pl = window.__player; if (!pl) return; await addOtherPlayer({ objectID: 99999, race: myRace, sex: mySex, x: pl.col + 1, y: pl.row, dir: 4, name: "测试目标", curHP: 30, maxHP: 50 }); } };  // 验证用: 注入带血条/名字的目标
 // 渲染服务端角色列表: 每个角色一个按钮(可选), 有空槽再给「创建新角色」入口。
 function renderPCList(p) {
