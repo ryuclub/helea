@@ -389,7 +389,7 @@ void main(){
       mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST;
     } else { mat.emissiveColor = new B.Color3(1, 0.85, 0.2); mat.alpha = 0.85; }
     plane.material = mat;
-    this._groundItems.set(objectID, { plane, mat });
+    this._groundItems.set(objectID, { plane, mat, w, h });   // w/h 供精灵屏幕矩形命中
   }
   removeGroundItem(objectID) {
     const g = this._groundItems.get(objectID); if (!g) return;
@@ -476,7 +476,7 @@ void main(){
       if (!fr) { part.plane.setEnabled(false); continue; }        // 该部位此动作无帧→隐藏
       const m = e.frameMeta[fr.s]; if (!m) { part.plane.setEnabled(false); continue; }
       part.plane.setEnabled(true);
-      if (part.order === 0) { e._h = m.h; e._vtop = m.vtop || 0; }  // 身体定血条/名字高度
+      if (part.order === 0) { e._h = m.h; e._w = m.w; e._vtop = m.vtop || 0; }  // 身体定血条/名字高度 + 点击命中矩形宽
       const cx = gx + fr.cx + m.w / 2, cy = gy + fr.cy + m.h / 2;   // 贴图中心(全局像素), 各部位各自锚点
       const w = this._gw(cx, cy);
       part.plane.position.set(w.x, w.y, depthZ(depthY) - part.order * 0.0008);  // 装备层在身体前(order大更前)
@@ -574,14 +574,37 @@ void main(){
     }
     if (best) this.moveTo(best.col, best.row);
   }
+  // 精灵屏幕矩形(AABB): 把 plane(中心+精灵宽高)投影到屏幕, 复刻开源 IsPointInScreenRect。
+  _screenRectOf(plane, w, h) {
+    const B = BABYLON, rw = this.engine.getRenderWidth(), rh = this.engine.getRenderHeight();
+    const vpw = this.camera.viewport.toGlobal(rw, rh), tm = this.scene.getTransformMatrix();
+    const px = plane.position.x, py = plane.position.y, pz = plane.position.z, hw = (w || 40) / 2, hh = (h || 60) / 2;
+    const a = B.Vector3.Project(new B.Vector3(px - hw, py + hh, pz), B.Matrix.Identity(), tm, vpw);
+    const b = B.Vector3.Project(new B.Vector3(px + hw, py - hh, pz), B.Matrix.Identity(), tm, vpw);
+    return { left: Math.min(a.x, b.x), right: Math.max(a.x, b.x), top: Math.min(a.y, b.y), bottom: Math.max(a.y, b.y) };
+  }
+  // 复刻开源 MTopView::GetSelectedObject: 鼠标在哪个生物的精灵屏幕矩形内(整个精灵可点, 无视地块/物件遮挡);
+  // 多个重叠取屏幕最下方(开源遍历下→上、下方优先)。返回 {oid, e} | null。
+  _pickEntityAt(sx, sy) {
+    let best = null, bestBottom = -Infinity;
+    for (const [oid, e] of this._others) {
+      if (!e.plane || e.plane.isDisposed()) continue;
+      const r = this._screenRectOf(e.plane, e._w, e._h);
+      if (sx >= r.left && sx < r.right && sy >= r.top && sy < r.bottom && r.bottom > bestBottom) { bestBottom = r.bottom; best = { oid, e }; }
+    }
+    return best;
+  }
   // 锁定目标战斗(每帧驱动): 与目标相邻则面向+攻击(冷却门槛), 否则空闲时寻路逼近。点一次怪即持续追打。
   // 目标消失/死亡 → 解除锁定。键盘移动/点地面会清 _atkTarget。
   _tickCombat(now) {
     const oid = this._atkTarget; if (oid == null) return;
     const e = this._others.get(oid), pe = this.player;
     if (!e || e.dying || !e.plane || e.plane.isDisposed() || !pe) { this._atkTarget = null; return; }
+    if (pe.oneShot) return;                                       // 攻击/动作动画播放中: 不打断、不重算
     const dist = Math.max(Math.abs(e.col - pe.col), Math.abs(e.row - pe.row));   // 切比雪夫
-    if (dist <= 1) {                                              // 相邻: 攻击(冷却门槛防 spam)
+    if (this._dbgAtk && now - (this._dbgAtkT || 0) > 700) { this._dbgAtkT = now; console.log(`[atk] target#${oid} dist=${dist} pe(${pe.col},${pe.row}) e(${e.col},${e.row}) stepping=${pe.stepping} cd=${Math.max(0,(this._atkCdUntil||0)-now)|0}`); }
+    if (dist <= 1) {                                              // 范围内(开源 m_TraceDistance=1): 停下面向攻击
+      this.path = null; pe.stepping = false;                     // SetStop: 到范围立即停止移动
       pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row));
       if (now >= (this._atkCdUntil || 0)) {
         this.playAction("attack");
@@ -589,7 +612,7 @@ void main(){
         else this._netAttack(oid);
         this._atkCdUntil = now + (this.atkDelayMs || 700);        // 攻速冷却(对齐服务端节奏)
       }
-    } else if (!pe.stepping && !pe.oneShot) {   // 太远且不在步进/动作中: 逼近(本地预测移动, 不阻塞)
+    } else if (!pe.stepping) {                                   // 范围外且不在步进: 逼近(本地预测, 不阻塞)
       this._approachTarget(e);
     }
   }
@@ -680,26 +703,25 @@ void main(){
     if (this._pointerInstalled) return; this._pointerInstalled = true;
     this.scene.onPointerObservable.add((pi) => {
       if (pi.type !== BABYLON.PointerEventTypes.POINTERPICK) return;
-      const p = pi.pickInfo; if (!p || !p.hit) return;
-      // 点到生物精灵: 怪物→攻击(面向+发 CG_ATTACK+本地攻击动画), NPC→对话(发 CGNPCTalk); 否则点地面寻路。
-      if (p.pickedMesh) {
-        for (const [oid, e] of this._others) {
-          if (e.plane !== p.pickedMesh) continue;
-          if (e.kind === "monster" && this._netAttack) {                                   // 锁定目标: 持续追打(自动逼近→相邻则攻击), 直到怪死/取消
-            this._atkTarget = oid; this._tickCombat(performance.now());
-            return;
-          }
-          if (e.kind === "npc" && this._netNPCTalk) { this._netNPCTalk(oid); return; }
-        }
+      const sx = this.scene.pointerX, sy = this.scene.pointerY;
+      // ★复刻开源命中: 先按精灵屏幕矩形选中生物(整个精灵可点, 无视遮挡), 怪→锁定攻击, NPC→对话。
+      const hit = this._pickEntityAt(sx, sy);
+      if (hit) {
+        if (hit.e.kind === "monster" && this._netAttack) { this._atkTarget = hit.oid; this._tickCombat(performance.now()); return; }
+        if (hit.e.kind === "npc" && this._netNPCTalk) { this._atkTarget = null; this._netNPCTalk(hit.oid); return; }
+        // 他玩家: 暂无交互(PvP 后续), 落到下方移动
       }
-      if (this._netPickup && p.pickedMesh) {                  // 点到地面物品 → 拾取
+      // 地面掉落物: 同样按精灵屏幕矩形命中
+      if (this._netPickup) {
         for (const [oid, g] of this._groundItems) {
-          if (g.plane === p.pickedMesh) { this._netPickup(oid); return; }
+          if (!g.plane || g.plane.isDisposed()) continue;
+          const r = this._screenRectOf(g.plane, g.w, g.h);
+          if (sx >= r.left && sx < r.right && sy >= r.top && sy < r.bottom) { this._netPickup(oid); return; }
         }
       }
-      const { col, row } = this._worldToTile(p.pickedPoint);
-      this._atkTarget = null;             // 点地面移动→取消攻击锁定
-      this.moveTo(col, row);
+      // 否则点地面寻路(默认 pick 取地面世界点 → 格子)
+      const p = pi.pickInfo;
+      if (p && p.pickedPoint) { this._atkTarget = null; const { col, row } = this._worldToTile(p.pickedPoint); this.moveTo(col, row); }
     });
   }
 
