@@ -98,6 +98,10 @@ export const PACKET = {
   // 快捷栏(明文): 绑物品入栏 CG_ADD_MOUSE_TO_QUICKSLOT(9) ObjID u32+SlotID u8; 从栏喝药 CG_USE_POTION_FROM_QUICKSLOT(140) 同字段
   CG_ADD_MOUSE_TO_QUICKSLOT: 9,
   CG_USE_POTION_FROM_QUICKSLOT: 140,
+  // 加属性点(明文): CG_USE_BONUS_POINT(134) Which u8(INC_INT=0/INC_STR=1/INC_DEX=2)。吸血鬼/异界者升级手动加点; 回 OK/FAIL, 属性变化走 GC_MODIFY_INFORMATION
+  CG_USE_BONUS_POINT: 134,
+  GC_USE_BONUS_POINT_OK: 412,
+  GC_USE_BONUS_POINT_FAIL: 411,
 };
 export const NAME = Object.fromEntries(Object.entries(PACKET).map(([k, v]) => [v, k]));
 
@@ -323,6 +327,10 @@ export function encCGAddMouseToQuickSlot({ objectID, slotID }) {
 // 从快捷槽喝药 CG_USE_POTION_FROM_QUICKSLOT(140, 明文): objectID=槽内药水, slotID=槽号。回血/蓝走 GC_MODIFY_INFORMATION。
 export function encCGUsePotionFromQuickSlot({ objectID, slotID }) {
   return gframe(PACKET.CG_USE_POTION_FROM_QUICKSLOT, new Writer().u32(objectID >>> 0).u8(slotID).build());
+}
+// 加属性点 CG_USE_BONUS_POINT(134, 明文): which=INC_INT(0)/INC_STR(1)/INC_DEX(2)。回 GC_USE_BONUS_POINT_OK/FAIL, 属性走 GC_MODIFY_INFORMATION。
+export function encCGUseBonusPoint({ which }) {
+  return gframe(PACKET.CG_USE_BONUS_POINT, new Writer().u8(which & 0xff).build());
 }
 // 背包格→光标 CGAddInventoryToMouse(4) / 光标→背包格 CGAddMouseToInventory(8)。★服务端明文读, 永远明文发。
 export function encCGAddInventoryToMouse({ objectID, invenX, invenY }) {

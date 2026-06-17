@@ -87,7 +87,7 @@ import { ShopUI } from "../src/ui-shop.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCLQueryCharacterName, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
   encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
   encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell, encCGUsePotionFromInventory,
-  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot,
+  encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot, encCGUseBonusPoint,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "../src/proto.js";
 import { loadItemInf, getItemInfo } from "../src/iteminfo.js";
 import { loadMonsterMap, loadCreatureSprite, monsterFrameID, spriteFrameID } from "../src/creature-sprite.js";
@@ -404,10 +404,19 @@ function showLevelUp(level) {
 
 // 角色信息面板(C 键开关)。数据忠实来自服务端; 美术暂用 DOM(infoXXX.spk 完整面板留后续)。
 let charPanel = null;
+const ATTR_OF = { 0: "int", 1: "str", 2: "dex" };   // INC_INT/STR/DEX → hpmp 字段
+const _bbtn = (w) => `<span class="bonusBtn" data-w="${w}" style="cursor:pointer;padding:0 5px;margin-left:1px;color:#1a120a;background:#ffd87a;border-radius:3px;font-weight:bold">+</span>`;
+let _pendingBonus = null;
+function useBonusPoint(which) {                       // 加属性点(乐观; GC_MODIFY_INFORMATION 覆盖真实值; FAIL 回滚)
+  if (!hpmp.bonus || hpmp.bonus <= 0) return;
+  if (gws && gws.readyState === 1) gws.send(encCGUseBonusPoint({ which }));
+  const attr = ATTR_OF[which]; hpmp.bonus--; hpmp[attr]++; _pendingBonus = { attr }; updateCharPanel();
+}
 function ensureCharPanel() {
   if (charPanel) return charPanel;
   const d = document.createElement("div"); d.id = "charPanel";
-  d.style.cssText = "position:absolute;right:14px;top:60px;z-index:20;display:none;min-width:190px;padding:10px 13px;background:rgba(20,16,10,.92);border:1px solid #6a5a3a;border-radius:6px;color:#e8d8b0;font:12px/1.75 monospace;box-shadow:0 2px 14px #000a;pointer-events:none;";
+  d.style.cssText = "position:absolute;right:14px;top:60px;z-index:20;display:none;min-width:190px;padding:10px 13px;background:rgba(20,16,10,.92);border:1px solid #6a5a3a;border-radius:6px;color:#e8d8b0;font:12px/1.75 monospace;box-shadow:0 2px 14px #000a;pointer-events:auto;";
+  d.addEventListener("click", (e) => { const b = e.target.closest(".bonusBtn"); if (b) useBonusPoint(+b.dataset.w); });  // 委托(innerHTML 重建不丢)
   $("game").appendChild(d); charPanel = d; return d;
 }
 function updateCharPanel() {
@@ -420,7 +429,9 @@ function updateCharPanel() {
     `<div style="font-size:13px;color:#ffd87a;border-bottom:1px solid #6a5a3a;margin-bottom:6px;padding-bottom:4px">${myCharName || ""} · ${raceCN}</div>`
     + `等级: <b style="color:#ffd87a">${hpmp.level}</b>${myRace === "slayer" ? " <span style='color:#9a8'>技能域</span>" : ""}<br>`
     + `HP: ${hpmp.hp}/${hpmp.hpMax}${hpmp.mpMax > 0 ? `　MP: ${hpmp.mp}/${hpmp.mpMax}` : ""}<br>`
-    + `力STR: ${hpmp.str}　敏DEX: ${hpmp.dex}　智INT: ${hpmp.int}<br>`
+    + (hpmp.bonus > 0
+        ? `力STR: ${hpmp.str} ${_bbtn(1)}　敏DEX: ${hpmp.dex} ${_bbtn(2)}　智INT: ${hpmp.int} ${_bbtn(0)}<br>`   // 有加点→显示 + 按钮
+        : `力STR: ${hpmp.str}　敏DEX: ${hpmp.dex}　智INT: ${hpmp.int}<br>`)
     + expLine + `<br>`
     + `善恶: ${hpmp.alignment}　名望: ${hpmp.fame}<br>`
     + `金钱: ${hpmp.gold}` + (hpmp.bonus != null ? `　加点: ${hpmp.bonus}` : "");
@@ -623,6 +634,8 @@ function onGamePacket(p) {
   else if (p.name === "GC_MODIFY_INFORMATION") { // HP/MP/经验/等级/属性 增量: 按 type 分发到状态
     applyMods(p.mods);
   }
+  else if (p.name === "GC_USE_BONUS_POINT_OK") { _pendingBonus = null; }                                   // 加点成功(已乐观, 属性走 GC_MODIFY_INFORMATION)
+  else if (p.name === "GC_USE_BONUS_POINT_FAIL") { if (_pendingBonus) { hpmp.bonus++; hpmp[_pendingBonus.attr]--; _pendingBonus = null; updateCharPanel(); log("加点失败", "err"); } }
   // ── 其他玩家可见(三族, 各自精灵包) ──
   else if (p.name === "GC_ADD_SLAYER" || p.name === "GC_ADD_VAMPIRE" || p.name === "GC_ADD_OUSTERS") { addOtherPlayer(p.creature); }
   else if (p.name === "GC_ADD_MONSTER" || p.name === "GC_ADD_NPC") { addCreature(p.creature); }   // 怪物/NPC 进入视野
@@ -862,7 +875,8 @@ window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreatur
   openShop: (list) => { const s = ensureShopUI(); s.race = myRace; s.open(0xABCD, list); },  // 验证用: 喂假 GCShopList 直接开商店窗
   selScreen: () => charSelect, ccScreen: () => charCreate, showCharSelect,                     // 验证用: 选角/建角屏
   qbTest: (gear) => { const q = ensureQuickBar(); q.setGear(gear); return q; },                // 验证用: 喂假腰带 gear 测快捷栏
-  applyMods };                                                                                  // 验证用: 测升级检测
+  applyMods,                                                                                    // 验证用: 测升级检测
+  spawnTest: async () => { const pl = window.__player; if (!pl) return; await addOtherPlayer({ objectID: 99999, race: myRace, sex: mySex, x: pl.col + 1, y: pl.row, dir: 4, name: "测试目标", curHP: 30, maxHP: 50 }); } };  // 验证用: 注入带血条/名字的目标
 // 渲染服务端角色列表: 每个角色一个按钮(可选), 有空槽再给「创建新角色」入口。
 function renderPCList(p) {
   const box = $("pclist"); box.style.display = "block";
