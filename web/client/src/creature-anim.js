@@ -15,10 +15,13 @@ export const BASE_ACTION = { STAND: 0, MOVE: 1, ATTACK: 2, DIE: 6 };
 //   Vampire AC: ADVANCEMENT_STOP=100→0, MOVE=101→1, ATTACK_NORMAL=102→2, DIE=106→6。
 //   Ousters AC 默认 wristlet(无 chakram): WRISTLET_STOP=102→2, WRISTLET_MOVE=103→3(开源 _ShowCharacterACOusters);
 //     ⚠ 必须配 FrameID 1(身体); 之前误用 FrameID 0 故 idx2/3 取不到帧。die=6, attack 待 ConvTable 校正(暂 4)。
+// ★cfpk action 下标 = 开源 ConvAdvancement*ActionTable[baseAction] 的 ACTION_ADVANCEMENT 枚举值 − 100(ADVANCEMENT_ACTION_START)。
+// 忠实开源 MTopViewDraw.cpp(非手搓): vampire ATTACK_NORMAL=107→7(旧用2实为 DAMAGED 受击, 故"攻击播挨打"); DIE=103→3; DAMAGED=102→2。
+// ousters wristlet: STOP=102→2,MOVE=103→3,ATTACK_NORMAL=105→5,DIE=114→14,DAMAGED=115→15。
 const RACE_ACTION_INDEX = {
-  slayer:  { stand: 3, move: 7, attack: 8, die: 36 },
-  vampire: { stand: 0, move: 1, attack: 2, die: 6 },
-  ousters: { stand: 2, move: 3, attack: 4, die: 6 }, // wristlet on FrameID 1(开源 coat=1 + WRISTLET 动作)
+  slayer:  { stand: 3, move: 7, attack: 8, die: 36, damaged: 35 },   // 无武器→mace/拳(SLAYER_WEAPON_ACTIONS.mace); attack 借 SWORD_SLOW 108→8
+  vampire: { stand: 0, move: 1, attack: 7, die: 3, damaged: 2 },     // 修正: attack 2→7, die 6→3
+  ousters: { stand: 2, move: 3, attack: 5, die: 14, damaged: 15 },   // 修正: wristlet attack 4→5, die 6→14
 };
 // cfpk 第一维(FrameID/coat): 开源按 外观/装备/进阶 选 FrameID 叠多部位。AC 包结构(完整调查):
 //   AC Slayer 身体 = AC_BODY=FrameID 0; AC Vampire 身体 = FrameID 0(武器在 FrameID 1);
