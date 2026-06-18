@@ -32,13 +32,16 @@ function dirOf(dc, dr) {
 import { currentEpoch } from "./terrain.js";   // 换区代次守门: 丢弃旧 zone 在途块结果
 
 const TW = 48, TH = 24;       // 地砖像素(全局坐标基准)
+const STEP_MS = 300;          // 走一格耗时(开源 MoveTimes*MoveRatio 帧, 这里用时间驱动等价像素滑动)
+// 物件视野窗口半径(格): 只为玩家周围此范围内物件建 mesh(复刻开源 DrawZone 只画视野窗口 ±9列×±13行 + 余量)。
+// 远大于可视范围确保移动时边缘不"突现"/黑洞; 但远小于整图 → 大地图(256x256)物件不再全建 mesh 而爆炸。
+const OBJ_WIN_COL = 28, OBJ_WIN_ROW = 34;
 const BLOCK = 16;             // 区块边长(格), 必须与 terrain.js 一致
 // 开源客户端整张地图常驻内存(MZone::m_ppSector 全量), zone 内从不卸载, 只按可视窗口(±10列/±16行)绘制。
 // 我们用区块流式, 但要逼近开源: 加载半径放大到远超可视窗口(±48格), 提前把前方块备好(消除"该载没载的黑块");
 // 卸载半径再留足滞回(±64格, RB+1), 让跨多块的高建筑不会因底部块被提前卸载而整楼消失(=空气墙真因之一)。
 const RB = 3;                 // 加载半径(块, ±48 格): 远超开源可视窗口 → 移动时前方早已就绪
 const MAX_CONCURRENT_LOADS = 6; // 区块并发加载上限(并行 fetch, 消除"边缘黑块过会儿才显示")
-const BUILD_PER_FRAME = 40;   // 每帧最多创建的建筑数(全局限速, 防单帧爆量)
 // 墙透明椭圆窗半轴(像素): 纵向椭圆, 比角色(精灵约 48宽×96高)稍大 → 约 68宽×124高 刚好包住人。
 const WALL_TRANS_RX = 34, WALL_TRANS_RY = 62;
 
@@ -53,8 +56,10 @@ export class GameRenderer {
     this._blocks = new Map();        // "bx,by" -> {bx,by,ground,buildings:[],loading}
     this._blockLoader = null; this._map = null;   // 在途块数从 _blocks 里 loading:true 实时统计(无独立计数器)
     this._loadingAll = false; this._wholeMapLoaded = false;  // 整区同步加载模式(开源整图常驻): 期间/之后停用异步流式
-    this._zoneObjects = [];          // 本 zone 全部物件网格(整区常驻, 对齐开源; 不按块/半径丢弃, 换区才整批清)
-    this._objQ = null;               // 物件创建队列(进区一次性入队, 逐帧限速建网格)
+    this._objData = null;            // 本 zone 全部物件数据(常驻内存, 防黑洞; 不全建 mesh)
+    this._objGrid = null;            // 物件按格索引 Map("col,row"→[obj]) 供视野窗口查询
+    this._objMeshes = new Map();     // 当前已建 mesh 的物件 Map(mid→{mesh,mat,tx,wall}); 仅视野窗口内
+    this._objWinKey = null;          // 上次窗口中心(玩家格"c,r"); 未变则跳过更新(节流)
     // 换区原子性门(对齐开源"换区同步重建, 无在途任务"): 换区一开始(clearBlocks)置 false → 关闭地砖流式,
     // 直到新区地图/物件/玩家就位(markZoneReady)再开。否则换区途中 _updateBlocks 会用"旧 zone 的 _map"
     // 建块却打上"新 epoch"(initTerrain 里 _epoch++ 先于 _map 赋值) → 旧区内容混入新区 = 错块/黑带。
@@ -208,45 +213,70 @@ void main(){
   }
 
   // 进区: 接收本 zone 全部物件绘制数据(对齐开源整区常驻), 入队逐帧限速建网格。换区时由 clearBlocks 整批清。
+  // 物件数据整区常驻(防黑洞), 按格建索引; 不立即建 mesh —— mesh 由 _updateObjectMeshes 按视野窗口动态增删。
   loadZoneObjects(list) {
-    if (!list || !list.length) { this._objQ = null; return; }
-    this._objQ = { list, i: 0 };
-  }
-
-  // 每帧从物件队列创建至多 BUILD_PER_FRAME 个(全局限速)。物件整区常驻, 不随块卸载 → 绝不黑洞。
-  _drainBuildQueue() {
-    const B = BABYLON;
-    if (!this._objQ) return;
-    let budget = BUILD_PER_FRAME;
-    const q = this._objQ;
-    const end = Math.min(q.i + budget, q.list.length);
-    for (; q.i < end; q.i++) {
-      const b = q.list[q.i];
-      const tx = B.RawTexture.CreateRGBATexture(b.rgba, b.width, b.height, this.scene, false, true, B.Texture.NEAREST_SAMPLINGMODE); tx.hasAlpha = true;
-      const pl = B.MeshBuilder.CreatePlane("obj", { width: b.width, height: b.height }, this.scene);
-      const w = this._gw(b.gx + b.width / 2, b.gy + b.height / 2);
-      pl.position = new B.Vector3(w.x, w.y, depthZ(b.baseY));
-      const isWall = (b.bTrans & 1);   // OBJECT_TRANS_FLAG(bit0): 可透明墙 → 用圆窗着色器; 其余 → 普通不透明材质
-      let mat;
-      if (isWall) {
-        mat = new B.ShaderMaterial("wallm", this.scene, { vertex: "heleaWall", fragment: "heleaWall" },
-          { attributes: ["position", "uv"], uniforms: ["world", "worldViewProjection", "uPlayer", "uRadii", "uEnable"],
-            samplers: ["diffuse"], needAlphaBlending: true });
-        mat.setTexture("diffuse", tx);
-        mat.setVector2("uPlayer", new B.Vector2(-1e9, -1e9)); // 初始远离 → 全不透明
-        mat.setVector2("uRadii", new B.Vector2(WALL_TRANS_RX, WALL_TRANS_RY)); // 椭圆半轴(横,纵)
-        mat.setFloat("uEnable", 0);
-        mat.backFaceCulling = false;
-        mat.forceDepthWrite = true;     // 仍写深度 → 墙正常遮挡其它; 仅圆窗像素混合透出角色
-      } else {
-        mat = new B.StandardMaterial("om", this.scene);
-        mat.diffuseTexture = tx; mat.emissiveColor = new B.Color3(1, 1, 1); mat.disableLighting = true;
-        mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST; mat.specularColor = B.Color3.Black();
-      }
-      pl.material = mat; this._zoneObjects.push(pl);
-      if (isWall) this._walls.push({ mesh: pl, mat, gx: b.gx, gy: b.gy, w: b.width, h: b.height, vpRow: b.vpRow, _en: 0 });
+    this._disposeObjMeshes();
+    if (!list || !list.length) { this._objData = null; this._objGrid = null; return; }
+    this._objData = list; this._objGrid = new Map();
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i]; b._mid = i;
+      const col = Math.floor((b.gx + b.width / 2) / TW), row = (b.vpRow != null ? b.vpRow : Math.floor(b.gy / TH));
+      const k = col + "," + row; let arr = this._objGrid.get(k); if (!arr) this._objGrid.set(k, arr = []); arr.push(b);
     }
-    if (q.i >= q.list.length) this._objQ = null;
+    this._objWinKey = null;          // 强制下次重建窗口
+  }
+  // 建单个物件 mesh(从原全建逻辑提取)。返回 {mesh,mat,tx,wall}。
+  _objMeshFor(b) {
+    const B = BABYLON;
+    const tx = B.RawTexture.CreateRGBATexture(b.rgba, b.width, b.height, this.scene, false, true, B.Texture.NEAREST_SAMPLINGMODE); tx.hasAlpha = true;
+    const pl = B.MeshBuilder.CreatePlane("obj", { width: b.width, height: b.height }, this.scene);
+    const w = this._gw(b.gx + b.width / 2, b.gy + b.height / 2);
+    pl.position = new B.Vector3(w.x, w.y, depthZ(b.baseY));
+    let mat, wall = null;
+    if (b.bTrans & 1) {              // OBJECT_TRANS_FLAG: 可透明墙 → 圆窗着色器
+      mat = new B.ShaderMaterial("wallm", this.scene, { vertex: "heleaWall", fragment: "heleaWall" },
+        { attributes: ["position", "uv"], uniforms: ["world", "worldViewProjection", "uPlayer", "uRadii", "uEnable"], samplers: ["diffuse"], needAlphaBlending: true });
+      mat.setTexture("diffuse", tx); mat.setVector2("uPlayer", new B.Vector2(-1e9, -1e9));
+      mat.setVector2("uRadii", new B.Vector2(WALL_TRANS_RX, WALL_TRANS_RY)); mat.setFloat("uEnable", 0);
+      mat.backFaceCulling = false; mat.forceDepthWrite = true;
+      wall = { mesh: pl, mat, gx: b.gx, gy: b.gy, w: b.width, h: b.height, vpRow: b.vpRow, _en: 0 };
+      this._walls.push(wall);
+    } else {
+      mat = new B.StandardMaterial("om", this.scene);
+      mat.diffuseTexture = tx; mat.emissiveColor = new B.Color3(1, 1, 1); mat.disableLighting = true;
+      mat.useAlphaFromDiffuseTexture = true; mat.transparencyMode = B.Material.MATERIAL_ALPHATEST; mat.specularColor = B.Color3.Black();
+    }
+    pl.material = mat;
+    return { mesh: pl, mat, tx, wall };
+  }
+  // 视野窗口裁剪(复刻开源 DrawZone/UpdateImageObject): 只为玩家周围窗口内物件建 mesh, 窗口外 dispose。
+  // 物件数据(_objGrid)常驻不变 → 防黑洞; 仅 mesh 随窗口动态增删 → 稳态 mesh 恒定在窗口内数量(几百), 不再随整图疯长。
+  _updateObjectMeshes(pc, pr) {
+    if (!this._objGrid) return;
+    const key = pc + "," + pr;
+    if (this._objWinKey !== key) {                                   // 玩家格变 → 重算窗口: 即时 dispose 窗口外, 待建入队
+      this._objWinKey = key;
+      const want = new Set(), build = [];
+      for (let r = pr - OBJ_WIN_ROW; r <= pr + OBJ_WIN_ROW; r++)
+        for (let c = pc - OBJ_WIN_COL; c <= pc + OBJ_WIN_COL; c++) {
+          const arr = this._objGrid.get(c + "," + r); if (!arr) continue;
+          for (const b of arr) { want.add(b._mid); if (!this._objMeshes.has(b._mid)) build.push(b); }
+        }
+      for (const [mid, o] of this._objMeshes) if (!want.has(mid)) this._disposeOneObj(mid, o);
+      this._objBuildQ = build;
+    }
+    // 待建队列分摊到多帧建(每帧限量, 复刻开源 UpdateImageObject 增量更新 → 跨格不一次性建几十mesh, 消除spike/角色闪)
+    const q = this._objBuildQ;
+    if (q && q.length) { for (let n = 0; n < 12 && q.length; n++) { const b = q.pop(); if (!this._objMeshes.has(b._mid)) this._objMeshes.set(b._mid, this._objMeshFor(b)); } }
+  }
+  _disposeOneObj(mid, o) {
+    try { o.tx && o.tx.dispose(); o.mat && o.mat.dispose(); o.mesh && o.mesh.dispose(); } catch {}
+    if (o.wall) { const i = this._walls.indexOf(o.wall); if (i >= 0) this._walls.splice(i, 1); }
+    this._objMeshes.delete(mid);
+  }
+  _disposeObjMeshes() {
+    if (this._objMeshes) for (const [, o] of this._objMeshes) { try { o.tx && o.tx.dispose(); o.mat && o.mat.dispose(); o.mesh && o.mesh.dispose(); } catch {} }
+    this._objMeshes = new Map(); this._walls.length = 0; this._objWinKey = null; this._objBuildQ = null;
   }
 
   _removeBlock(key) {
@@ -263,10 +293,8 @@ void main(){
     this._wholeMapLoaded = false; this._loadingAll = false;   // 换区: 退出旧区整图常驻态(新区会重新整区加载)
     this._zoneReady = false;                                  // 换区原子门: 关流式, 直到新区就位(markZoneReady)
     for (const k of [...this._blocks.keys()]) this._removeBlock(k);
-    // 整批清本 zone 常驻物件(对齐开源换区整体重建): 释放网格+纹理+材质。
-    for (const pl of this._zoneObjects) { pl.material?.diffuseTexture?.dispose(); pl.material?.dispose(); pl.dispose(); }
-    this._zoneObjects.length = 0; this._objQ = null;
-    this._walls.length = 0;
+    // 换区: 释放当前窗口已建物件 mesh + 清物件数据/索引(新区会重新 loadZoneObjects)。
+    this._disposeObjMeshes(); this._objData = null; this._objGrid = null;
     if (this.player) { this.player.stepping = false; this._sendMove = 0; this.path = null; this._atkTarget = null; }
     for (const id of [...this._others.keys()]) this.removeOther(id);
     this.clearGroundItems();                                  // 换区: 清旧区地面掉落物
@@ -321,7 +349,8 @@ void main(){
     return { planes, plane: planes[0].plane, mat: planes[0].mat,   // e.plane=身体(兼容血条/dispose 等现有引用)
       textures, frameMeta, anim, col, row, dir: 2,
       action: "stand", animIdx: 0, animClock: 0, _lastNow: 0, frameOverride: null, oneShot: null,
-      stepping: false, fromCol: col, fromRow: row, toCol: col, toRow: row, t0: 0, stepMs: 320 };
+      // 开源移动模型: col/row=逻辑坐标(即时, m_X/m_Y); sx/sy=像素偏移(渐变到0, m_sX/m_sY); moveBuf=移动队列(m_listMoveBuffer)
+      stepping: false, sx: 0, sy: 0, sx0: 0, sy0: 0, stepDc: 0, stepDr: 0, stepT0: 0, moveBuf: null };
   }
 
   spawnSprite(framesById, col, row, anim, parts) {
@@ -436,12 +465,13 @@ void main(){
     clearTimeout(e._flashT);
     e._flashT = setTimeout(() => { if (e.dying) return; for (const pl of planes) if (pl.mat) pl.mat.emissiveColor = new B.Color3(1, 1, 1); }, 140);
   }
-  // 他人移动 GC_MOVE(282): 平滑步进到 (nc,nr), 朝向 dir。
+  // 他人移动 GC_MOVE(282): 入移动队列(复刻开源 m_listMoveBuffer)。上一步走完才取下一步 → 连续移动包不跳变(乱闪根因)。
   otherStep(objectID, nc, nr, dir) {
     const e = this._others.get(objectID); if (!e) return;
-    e.dir = dir; e.action = "move";
-    e.fromCol = e.col; e.fromRow = e.row; e.toCol = nc; e.toRow = nr;
-    e.stepping = true; e.t0 = performance.now();
+    (e.moveBuf || (e.moveBuf = [])).push({ nc, nr, dir });
+    while (e.moveBuf.length > 6) {                                  // 缓冲上限(开源 MAX_CREATURE_MOVE_BUFFER): 过长则瞬移消化, 防滞后累积
+      const m = e.moveBuf.shift(); e.col = m.nc; e.row = m.nr; e.dir = m.dir; e.sx = 0; e.sy = 0; e.stepping = false;
+    }
   }
   // 他人离开视野 GC_DELETE_OBJECT(232): 释放资源。
   removeOther(objectID) {
@@ -512,8 +542,10 @@ void main(){
     const idx = (e.frameOverride != null) ? Math.min(e.frameOverride, seq.length - 1) : (e.animIdx % seq.length);
     return seq[idx];
   }
-  _renderAt(e, col, row) { const tl = this._tileGTL(col, row); this._drawFrame(e, tl.x, tl.y); }
+  // 绘制位置 = 逻辑格像素 + 像素偏移(开源 GetPixelX = MapToPixelX(m_X) + m_sX)。
+  _renderAt(e, col, row) { const tl = this._tileGTL(col, row); this._drawFrame(e, tl.x + (e.sx || 0), tl.y + (e.sy || 0)); }
   _centerTile(col, row) { this._camTo(col * TW + TW / 2, row * TH + TH / 2); }
+  _camFollow(e) { this._camTo(e.col * TW + (e.sx || 0) + TW / 2, e.row * TH + (e.sy || 0) + TH / 2); }   // 相机跟随角色视觉位置(含偏移)
   _camTo(gx, gy) {
     const w = this._gw(gx, gy);
     this.camera.position = new BABYLON.Vector3(w.x, w.y, -100);
@@ -571,31 +603,26 @@ void main(){
     if (this._sendMove > 0) this._sendMove--;
     // 可选: 若本地预测与服务端(nc,nr)严重偏离可矫正; 开源默认信任本地, 仅靠 GC_MOVE_ERROR 重同步。
   }
-  // 服务器拒绝移动(GC_MOVE_ERROR): 重同步到服务器坐标 + 清待确认计数 + 弃当前路径。
+  // 服务器拒绝移动(GC_MOVE_ERROR): 复刻开源 PacketMoveNO —— 重同步坐标 + 清待确认 + 弃路径 + SetStop 站立。
+  // 把"被拒进入的格"记为服务器block(复刻开源 m_fProperty2 FLAG_SECTOR_BLOCK_SERVER_GROUND, 服务器下发的动态阻挡;
+  // 我们没专门下发包, 用 GC_MOVE_ERROR 推断 = 同等功能): 下次寻路避开它 → 重算绕路 → 不再撞同格反复被拒(乱震)。
   serverReject(x, y) {
     const e = this.player; if (!e) return;
-    e.col = x; e.row = y; e.stepping = false; this._sendMove = 0; this.path = null; this._renderAt(e, x, y);
+    if (this._map && (e.col !== x || e.row !== y)) {              // e.col 已即时预测进入被拒格 → 记为服务器block(1.5s TTL, 生物占位是动态的)
+      (this._srvBlock || (this._srvBlock = new Map())).set(e.row * this._map.width + e.col, performance.now() + 1500);
+    }
+    e.col = x; e.row = y; e.sx = 0; e.sy = 0; e.stepping = false; this._sendMove = 0; this.path = null;
+    if (e.action !== "stand") { e.action = "stand"; e.animIdx = 0; }
+    this._renderAt(e, x, y);
   }
   // 传送落点: 把现有角色放到新区坐标 + 相机居中(换区后调用)。
   placePlayer(x, y) {
     const e = this.player; if (!e) return;
-    e.col = x; e.row = y; e.stepping = false; this._sendMove = 0; e.action = "stand"; e.animIdx = 0;
+    e.col = x; e.row = y; e.sx = 0; e.sy = 0; e.stepping = false; this._sendMove = 0; e.action = "stand"; e.animIdx = 0;
     this._renderAt(e, x, y); this._centerTile(x, y);
   }
 
   // 近战太远: 寻路到目标怪的最近相邻可走格(玩家到达后再点击发起攻击)。
-  _approachTarget(e) {
-    const pe = this.player; if (!pe) return;
-    const DIRS = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [-1, 1], [1, -1], [1, 1]];
-    let best = null, bestD = Infinity;
-    for (const [dc, dr] of DIRS) {
-      const c = e.col + dc, r = e.row + dr;
-      if (!this._walkable(c, r)) continue;
-      const d = Math.max(Math.abs(c - pe.col), Math.abs(r - pe.row));
-      if (d < bestD) { bestD = d; best = { col: c, row: r }; }
-    }
-    if (best) this.moveTo(best.col, best.row);
-  }
   // 精灵屏幕矩形(AABB): 把 plane(中心+精灵宽高)投影到屏幕, 复刻开源 IsPointInScreenRect。
   _screenRectOf(plane, w, h) {
     const B = BABYLON, rw = this.engine.getRenderWidth(), rh = this.engine.getRenderHeight();
@@ -622,27 +649,30 @@ void main(){
     const oid = this._atkTarget; if (oid == null) return;
     const e = this._others.get(oid), pe = this.player;
     if (!e || e.dying || !e.plane || e.plane.isDisposed() || !pe) { this._atkTarget = null; return; }
-    if (pe.oneShot) return;                                       // 攻击/动作动画播放中: 不打断、不重算
     const dist = Math.max(Math.abs(e.col - pe.col), Math.abs(e.row - pe.row));   // 切比雪夫
-    if (this._dbgAtk && now - (this._dbgAtkT || 0) > 700) { this._dbgAtkT = now; console.log(`[atk] target#${oid} dist=${dist} pe(${pe.col},${pe.row}) e(${e.col},${e.row}) stepping=${pe.stepping} cd=${Math.max(0,(this._atkCdUntil||0)-now)|0}`); }
-    if (dist <= 1) {                                              // 范围内(开源 m_TraceDistance=1): 停下面向攻击
-      this.path = null; pe.stepping = false;                     // SetStop: 到范围立即停止移动
+    if (this._dbgAtk && now - (this._dbgT || 0) > 500) { this._dbgT = now; this.onLog && this.onLog(`[atk]dist=${dist} oneShot=${pe.oneShot ? pe.oneShot.action : "-"} step=${pe.stepping} path=${this.path ? this.path.length : 0} send=${this._sendMove || 0}`); }  // 真机诊断(__dbg.atkDebug()开): 怪攻击状态点怪无法攻击时看卡在哪
+    if (pe.oneShot) return;                                       // 攻击动作播放中: 不重算(开源动作驱动节奏, 动画播完才下次攻击)
+    // 开源 ActionInTraceDistance: dist<=TraceDistance(1) 即攻击, 完全独立于寻路(被围/贴脸寻路失败也能打)
+    if (dist <= 1) {                                              // 范围内: 停下面向攻击
+      this.path = null; pe.stepping = false; pe.sx = 0; pe.sy = 0; // SetStop: 停止移动 + 像素归位
       pe.dir = dirOf(Math.sign(e.col - pe.col), Math.sign(e.row - pe.row));
-      if (now >= (this._atkCdUntil || 0)) {
-        this.playAction("attack");
-        if (this._armedSkill && this._netSkill) this._netSkill(oid, this._armedSkill);
-        else this._netAttack(oid);
-        this._atkCdUntil = now + (this.atkDelayMs || 700);        // 攻速冷却(对齐服务端节奏)
+      this.playAction("attack");                                  // oneShot 防重入=动作播放节奏(开源, 无自创固定冷却)
+      if (this._armedSkill && this._netSkill) this._netSkill(oid, this._armedSkill);
+      else this._netAttack(oid);
+    } else if (!pe.stepping) {                                   // 范围外且不在步进: 复刻开源 ActionMove + KeepTraceCreature
+      // 开源: 沿 m_listDirection 走到底/堵了才重新 SetDestination(非每步重算)。即【path 有效→沿 path 稳定走(不乱跑); path 空(走完/被堵/被拒清)或怪移动→重算(绕障碍, 不卡)】。
+      // 被拒格记 _srvBlock(m_fProperty2)→重算避开它→绕路不撞同格(不乱震)。三者配合: 不乱跑(沿path) + 不卡(堵了重算绕) + 不乱震(避被拒格)。
+      if (!this.path || !this.path.length || this._traceX !== e.col || this._traceY !== e.row) {
+        this._traceX = e.col; this._traceY = e.row;
+        this.moveTo(e.col, e.row, 1);                            // 目标=怪格本身, traceDist=1: 到怪邻格即停(=攻击位)
       }
-    } else if (!pe.stepping) {                                   // 范围外且不在步进: 逼近(本地预测, 不阻塞)
-      this._approachTarget(e);
     }
   }
   // 一次性动作(攻击 attack / 死亡 die): 播一遍。hold=true 定格末帧(死亡), 否则播完回站立。
   playAction(name, hold = false) {
     const e = this.player; if (!e || !(e.anim[name] && e.anim[name].length)) return;
     e.oneShot = { action: name, start: e.animIdx, hold };
-    this.intent = { dc: 0, dr: 0 }; this.path = null; e.stepping = false;
+    this.intent = { dc: 0, dr: 0 }; this.path = null; e.stepping = false; e.sx = 0; e.sy = 0;
   }
 
   // 在生物身上播放一次性特效精灵动画(复刻开源 EFFECTSTATUS, 如升级光柱)。
@@ -685,36 +715,57 @@ void main(){
   _walkable(col, row) {
     const m = this._map;
     if (!m || col < 0 || row < 0 || col >= m.width || row >= m.height) return false;
-    return !(m.property[row * m.width + col] & 0x02);
+    const k = row * m.width + col;
+    if (m.property[k] & 0x02) return false;                          // 静态地图阻挡(开源 FLAG_SECTOR_BLOCK_GROUND)
+    if (this._srvBlock) { const exp = this._srvBlock.get(k); if (exp) { if (performance.now() < exp) return false; this._srvBlock.delete(k); } }  // 服务器动态block(开源 m_fProperty2), 过期自清
+    if (this._occupied && this._occupied.has(row * 4096 + col)) return false;   // 其他生物占位(开源 CanStandGroundCreature 查 FLAG_SECTOR_GROUNDCREATURE): 寻路避开有怪的格(含目标怪格→寻路停其邻格=攻击位)
+    return true;
   }
-  // 鼠标点击目标格 → BFS 寻路
-  moveTo(col, row) {
+  // 重建生物占位集(复刻开源 sector GROUNDCREATURE flag): 视野内非死亡生物所在格 → 寻路视为障碍, 自动绕开。
+  _rebuildOccupied() {
+    const occ = this._occupied || (this._occupied = new Set());
+    occ.clear();
+    for (const e of this._others.values()) { if (e.dying) continue; occ.add(e.row * 4096 + e.col); }
+  }
+  // 寻路到目标格。traceDist>0(追怪): 到距目标<=traceDist 的格就停(=怪邻格=攻击位, 因怪格被占位不可走); =0(点地面): 到精确目标。
+  moveTo(col, row, traceDist = 0) {
     const m = this._map;
-    if (this.player) this.player.oneShot = null; // 鼠标移动解除一次性动作
+    if (this.player) this.player.oneShot = null;
     const tc = Math.max(0, Math.min(m.width - 1, col)), tr = Math.max(0, Math.min(m.height - 1, row));
     const e = this.player;
-    const path = this._findPath(e.col, e.row, tc, tr);
+    const path = this._findPath(e.col, e.row, tc, tr, traceDist);
     if (path && path.length) { this.path = path; this.intent = { dc: 0, dr: 0 }; }
+    else this.path = null;
   }
-  // BFS 寻路(8 向, 不穿墙角, 节点上限 30000)。返回不含起点的格子数组, 无路返回 null。
-  _findPath(sc, sr, tc, tr) {
-    if (!this._walkable(tc, tr) || (sc === tc && sr === tr)) return null;
+  // 寻路(复刻开源 SetDestination: Best-First + 优先到目标距离最近 + 视野范围限制 + 避其他生物/目标怪)。
+  // traceDist: 追怪时到 dist<=traceDist 即停(怪格被占位不可走→自然停邻格=攻击位)。返回不含起点的格子数组, 无路返回 null。
+  _findPath(sc, sr, tc, tr, traceDist = 0) {
+    if (sc === tc && sr === tr) return null;
+    if (traceDist === 0 && !this._walkable(tc, tr)) {                 // 开源 SetDestination(1213-1248): 点地面目标不可走 → 朝玩家方向逐格挪到最近可走格(limit 20)
+      const sgx = Math.sign(sc - tc), sgy = Math.sign(sr - tr); let lim = 20;
+      while (!this._walkable(tc, tr) && lim-- > 0 && !(tc === sc && tr === sr)) { if (tc !== sc) tc += sgx; if (tr !== sr) tr += sgy; }
+      if (!this._walkable(tc, tr)) return null;
+    }
     const m = this._map, W = m.width, key = (c, r) => r * W + c;
-    const prev = new Map(); const q = [[sc, sr]]; prev.set(key(sc, sr), -1);
+    const cheby = (c, r) => Math.max(Math.abs(c - tc), Math.abs(r - tr));
     const DIRS = [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [-1, 1], [1, -1], [1, 1]];
-    let head = 0, guard = 0;
-    while (head < q.length && guard++ < 30000) {
+    const R = 28;                                                     // 视野范围限制(对齐开源"只在屏幕窗口内寻路", g_SECTOR ~16x25): 防大图全图搜索
+    // BFS(广度优先): 保证绕过凹障碍(怪墙)找到最短路, 不像纯贪心 Best-First 会在凹障碍前卡死。到目标(traceDist 内邻格)即停。
+    const prev = new Map(); prev.set(key(sc, sr), -1);
+    const q = [[sc, sr]]; let head = 0, found = null;
+    while (head < q.length) {
       const [c, r] = q[head++];
-      if (c === tc && r === tr) break;
+      if (cheby(c, r) <= traceDist) { found = [c, r]; break; }        // 到目标(或追怪邻格)→停
       for (const [dc, dr] of DIRS) {
         const nc = c + dc, nr = r + dr;
-        if (!this._walkable(nc, nr) || prev.has(key(nc, nr))) continue;
-        if (dc && dr && (!this._walkable(c + dc, r) || !this._walkable(c, r + dr))) continue; // 不穿墙角
+        if (Math.abs(nc - sc) > R || Math.abs(nr - sr) > R) continue; // 超视野范围不搜
+        if (prev.has(key(nc, nr)) || !this._walkable(nc, nr)) continue;
+        if (dc && dr && (!this._walkable(c + dc, r) || !this._walkable(c, r + dr))) continue;  // 不穿墙角
         prev.set(key(nc, nr), key(c, r)); q.push([nc, nr]);
       }
     }
-    if (!prev.has(key(tc, tr))) return null; // 不可达
-    const out = []; let k = key(tc, tr);
+    if (!found) return null;
+    const out = []; let k = key(found[0], found[1]);
     while (k !== -1 && k !== key(sc, sr)) { out.push({ col: k % W, row: (k - k % W) / W }); k = prev.get(k); }
     return out.reverse();
   }
@@ -765,25 +816,28 @@ void main(){
     return { dc: 0, dr: 0 };
   }
   _setDir(e, dc, dr) { e.dir = dirOf(dc, dr); }
-  _beginStep(e, dc, dr) {
+  // 开始一步: 逻辑坐标即时到新格(开源 MovePosition), 像素偏移设为"从旧格滑来"(开源 m_sX=m_sXTable[dir])。不可走→false。
+  _startStep(e, dc, dr) {
     this._setDir(e, dc, dr);
     const nc = e.col + dc, nr = e.row + dr;
-    if (!this._walkable(nc, nr)) { this.path = null; return false; } // 障碍/触边: 停步
-    e.fromCol = e.col; e.fromRow = e.row; e.toCol = nc; e.toRow = nr;
-    e.stepping = true; e.t0 = performance.now();
+    if (!this._walkable(nc, nr)) return false;
+    e.col = nc; e.row = nr;                                         // 逻辑坐标即时(攻击/距离判定即时准)
+    e.sx = e.sx0 = -dc * TW; e.sy = e.sy0 = -dr * TH;              // 视觉仍在旧格, 待滑回 0
+    e.stepDc = dc; e.stepDr = dr; e.stepping = true; e.stepT0 = performance.now(); e.action = "move";
     return true;
   }
 
   start() {
     const FRAME_MS = 45; // 序列帧推进间隔(独立于位移)
-    const MAX_CLIENT_MOVE = 5; // 开源 MAX_CLIENT_MOVE: 本地预测最多领先服务端的步数(防超前)
+    const MAX_CLIENT_MOVE = 6; // 开源 ClientConfig MAX_CLIENT_MOVE=6: 本地预测最多领先服务端的步数(防超前)
     this.scene.onBeforeRenderObservable.add(() => {
      try {
       const now = performance.now();
       const e = this.player;
       this._updateBlocks(e ? e.col : this._focusCol, e ? e.row : this._focusRow); // 区块网格: 每帧载/卸1块
-      this._drainBuildQueue();            // 建筑限速创建(全局 BUILD_PER_FRAME/帧)
+      this._updateObjectMeshes(e ? e.col : this._focusCol, e ? e.row : this._focusRow);  // 物件视野窗口裁剪(只建窗口内mesh, 防整图爆炸)
       for (const o of this._others.values()) this._updateOther(o, now, FRAME_MS); // 其他玩家逐帧驱动
+      this._rebuildOccupied();            // 生物占位集(寻路避怪, 开源 GROUNDCREATURE); 攻击独立于寻路(dist<=1直接打, 见 _tickCombat)
       this._updateEffects(now);           // 一次性特效(升级等)逐帧 + 播完移除
       if (!e) return;
       this._tickCombat(now);              // 锁定目标: 自动逼近+攻击(点一次怪持续追打)
@@ -806,24 +860,22 @@ void main(){
       }
       e.frameOverride = null;
 
-      if (e.stepping) {
+      if (e.stepping) {                                                     // 步进中: 像素偏移渐变到0, 相机跟随视觉位置
         e.action = "move";
-        const p = Math.min(1, (now - e.t0) / e.stepMs);
-        const a = this._tileGTL(e.fromCol, e.fromRow), b = this._tileGTL(e.toCol, e.toRow);
-        const gx = a.x + (b.x - a.x) * p, gy = a.y + (b.y - a.y) * p;       // 逐帧像素插值(全局瓦片左上)
-        this._drawFrame(e, gx, gy);
-        this._camTo(gx + TW / 2, gy + TH / 2);                             // 相机平滑跟随
-        if (p >= 1) { e.col = e.toCol; e.row = e.toRow; e.stepping = false; }
+        this._advanceStep(e, now);
+        this._renderAt(e, e.col, e.row); this._camFollow(e);
       } else {
-        const { dc, dr } = this._nextStepDir(e);                            // 连续走: 一步接一步
+        const { dc, dr } = this._nextStepDir(e);                            // 连续走: 上一步完成才取下一步(开源 m_MoveCount==0 才开新步)
         if (dc || dr) {
-          // 忠实开源(MPlayer 本地预测): 立即本地步进 + 发 CGMove(不等确认); _sendMove 计数限流防超前。
-          if (this._netMove && (this._sendMove || 0) >= MAX_CLIENT_MOVE) { this._renderAt(e, e.col, e.row); }  // 待确认堆积(网络慢)→本帧不发新步; GC_MOVE_OK 会递减, 不会卡死
-          else if (this._beginStep(e, dc, dr)) {                            // 本地立即步进(走向下一格), 同帧发包
-            e.action = "move";
-            if (this._netMove) { this._netMove(e.dir, e.fromCol, e.fromRow); this._sendMove = (this._sendMove || 0) + 1; }  // 发包(起步格+方向); GC_MOVE_OK 仅确认计数(本地已走)
-            this._renderAt(e, e.col, e.row);
-          } else { this._renderAt(e, e.col, e.row); }                       // 障碍/触边: beginStep=false, 停
+          if (this._netMove && (this._sendMove || 0) >= MAX_CLIENT_MOVE) {  // 待确认堆积(开源 m_SendMove>MAX): 站立等待, 不发新步
+            if (e.action !== "stand") { e.action = "stand"; e.animIdx = 0; } this._renderAt(e, e.col, e.row);
+          } else if (this._startStep(e, dc, dr)) {                          // 本地即时步进(col已到新格), 同帧发包(起步格=col-d)
+            if (this._netMove) { this._netMove(e.dir, e.col - dc, e.row - dr); this._sendMove = (this._sendMove || 0) + 1; }
+            this._renderAt(e, e.col, e.row); this._camFollow(e);
+          } else {                                                          // 撞墙/不可走: 弃路径 + SetStop 站立(不残留走路动画=不原地踏步)
+            this.path = null;
+            if (e.action !== "stand") { e.action = "stand"; e.animIdx = 0; } this._renderAt(e, e.col, e.row);
+          }
         } else { if (e.action !== "stand") { e.action = "stand"; e.animIdx = 0; } this._renderAt(e, e.col, e.row); }
       }
       this._updateWallTransparency(e.col, e.row);   // 走到墙后→墙半透明(透出角色)
@@ -831,7 +883,7 @@ void main(){
     });
     // 渲染后画 2D 覆盖层(血条/名字): 用最新相机矩阵, 且不受上面 early-return 影响。
     this.scene.onAfterRenderObservable.add(() => { try { this._drawOverlays(); } catch {} });
-    this.engine.runRenderLoop(() => this.scene.render());
+    this.engine.runRenderLoop(() => { const s = performance.now(); this.scene.render(); this._renderMs = performance.now() - s; });  // 卡顿诊断: 记 GPU 渲染耗时
     return this;
   }
 
