@@ -17,7 +17,7 @@ import { HudHpBar } from "./ui-hud.js";
 import { InventoryUI } from "./ui-inventory.js";
 import { ShopUI } from "./ui-shop.js";
 import { encCLLogin, encCLGetPCList, encCLSelectPC, encCLCreatePC, encCLDeletePC, encCLQueryCharacterName, encCGConnect, encCGReady, encCGMove, encCGSay, encCGAttack,
-  encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk,
+  encCGAddInventoryToMouse, encCGAddMouseToInventory, encCGAddMouseToGear, encCGAddGearToMouse, encCGAddZoneToInventory, encCGAddMouseToZone, encCGNPCTalk, encCGDissectionCorpse,
   encCGShopRequestList, encCGShopRequestBuy, encCGShopRequestSell, encCGUsePotionFromInventory,
   encCGAddMouseToQuickSlot, encCGUsePotionFromQuickSlot, encCGSkillToObject,
   resetGameSeq, setEncryptCode, calcEncryptCode, decode, Framer } from "./proto.js";
@@ -25,7 +25,8 @@ import { loadItemInf, getItemInfo } from "./iteminfo.js";
 import { loadMonsterMap, loadCreatureSprite, monsterFrameID, spriteFrameID } from "./creature-sprite.js";
 
 const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
-const log = (m, c = "") => { const d = document.createElement("div"); d.className = "l " + c; d.textContent = m; logEl.prepend(d); };
+const _t0 = performance.now();
+const log = (m, c = "") => { const d = document.createElement("div"); d.className = "l " + c; d.textContent = `[${((performance.now() - _t0) / 1000).toFixed(1)}s] ${m}`; logEl.prepend(d); };
 setAssetLog(log);   // 素材系统中间日志接到 main 的 log
 // 游戏内聊天消息(全屏 HUD): 画面左下, 最多保留 12 条, 旧的自动移除。
 const gameMsgEl = document.getElementById("gameMsg");
@@ -51,7 +52,14 @@ window.__renderer = renderer;
 renderer.onLog = (m) => log(m, "info");                 // 重建各段耗时上报到日志
 // 大帧间隔(卡顿)探测: 任何 >120ms 的帧都打到日志, 直接看真机冻结时长
 let __last = performance.now();
-(function gap() { const n = performance.now(); const d = n - __last; __last = n; if (d > 120) log(`⚠ 卡顿帧 ${d | 0}ms`, "err"); requestAnimationFrame(gap); })();
+(function gap() {
+  const n = performance.now(); const d = n - __last; __last = n;
+  if (d > 120) {                                          // 卡顿成因: GPU渲染耗时高→GPU瓶颈; 远低于总帧→JS/加载spike(块/怪)
+    const r = window.__renderer, info = r ? ` [GPU渲染${r._renderMs | 0}ms · mesh${r.scene.meshes.length} · 怪${r._others ? r._others.size : 0} · 移动${r.player && r.player.stepping ? 1 : 0} · 块${r._blocks ? r._blocks.size : 0}]` : "";
+    log(`⚠ 卡顿帧 ${d | 0}ms${info}`, "err");
+  }
+  requestAnimationFrame(gap);
+})();
 
 // 移动(客户端本地, 相机平滑跟随): 键盘按住连续走(↑↓←→/WASD, 支持斜向); 鼠标点击地面走过去。
 const KEY = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0],
@@ -108,6 +116,7 @@ async function placePlayerAt(x, y) {
         SPAWN_COL = t.x; SPAWN_ROW = t.y;
         player = renderer.spawnSprite(frames, t.x, t.y, anim, parts);
         window.__player = player;
+        renderer.addDudes3D(t.x + 2, t.y, 1);                  // 3D 渲染参照: 玩家旁放 1 个官方 Dude(骨骼动画), 与 2D 同场验证 Babylon 3D 正常
         renderer.setNetMove((dir, cx, cy) => { if (gws && gws.readyState === 1) gws.send(encCGMove({ dir, x: cx, y: cy })); });
         // 普攻: 点怪 → 渲染器回调送 CG_ATTACK(目标ObjectID + 我当前格/朝向, 加密 SHUFFLE_4)。
         renderer.setNetAttack((targetID) => { if (gws && gws.readyState === 1 && player) gws.send(encCGAttack({ targetID, x: player.col, y: player.row, dir: player.dir })); });
@@ -121,6 +130,8 @@ async function placePlayerAt(x, y) {
         });
         // 点 NPC → 发 CGNPCTalk; 服务端回 GCNPCSayDynamic(中文对话)/GCNPCResponse(开界面/关对话)。
         renderer.setNetNPCTalk((objectID) => { if (gws && gws.readyState === 1) gws.send(encCGNPCTalk(objectID)); });
+        // 点尸体 → 发 CGDissectionCorpse(解剖); 服务端把宝物从尸体拖到地面格 → 回 GCDropItemToZone → 地面物可拾取。
+        renderer.setNetDissect((objectID, x, y) => { if (gws && gws.readyState === 1) gws.send(encCGDissectionCorpse({ objectID, x, y })); });
         log(`角色已站入 zone${t.zone} (${t.x},${t.y}) · ${myRace}${mySex ? "(女)" : "(男)"} · 服务器权威移动`, "ok");
       } else {
         renderer.placePlayer(t.x, t.y);                      // 换区/传送落点: 重定位现有角色到新图
@@ -161,6 +172,17 @@ async function addCreature(c) {
     const ch = monsterHeight(c.spriteType);   // Creature.inf[MonsterType].Height
     renderer.addOther(c.objectID, a.frames, c.x, c.y, c.dir, a.anim, { name: c.name, hp: c.curHP || 0, maxHP: c.maxHP || 0, kind: c.kind, creatureHeight: ch || null });
   } catch (e) { log("生物资源加载失败: " + e.message, "err"); }
+}
+
+// 怪死尸体(复刻开源 GCAddMonsterCorpseHandler): 用 monsterType 加载怪精灵 → 渲染成尸体(die末帧定格) + 注册为可拾取掉落容器(treasureCount)。
+async function addCorpse(p) {
+  if (!p) return;
+  try {
+    const [a] = await Promise.all([loadCreatureAssets(p.monsterType, false), ensureCreatureInfo()]);
+    if (!a) { log(`尸体精灵缺失 type${p.monsterType}`, "err"); renderer.removeOther(p.objectID); return; }   // 精灵缺失: 至少清掉活怪
+    const ch = monsterHeight(p.monsterType);
+    renderer.addCorpse(p.objectID, a.frames, p.x, p.y, p.dir, a.anim, { name: p.monsterName, monsterType: p.monsterType, treasureCount: p.treasureCount, creatureHeight: ch || null });
+  } catch (e) { log("尸体资源加载失败: " + e.message, "err"); }
 }
 
 // 连到 gameserver, 走 CGConnect→CG_READY, 入世
@@ -465,6 +487,7 @@ function firstFreeInvSlot(item) {
 }
 
 function onGamePacket(p) {
+  if (window.__pktLog) { window.__pktLog[p.name] = (window.__pktLog[p.name] || 0) + 1; }   // 诊断: 入世游戏包统计
   if (p.name === "GC_UPDATE_INFO") {
     death.reviveCleanup();                                                                                 // 复活/换区: 清死亡态(满血在复活点重生)
     if (p.curHP !== undefined) { hpmp.hp = p.curHP; hpmp.hpMax = p.maxHP || 1; hpmp.mp = p.curMP; hpmp.mpMax = p.maxMP || 1; updateHud(); applyCharFull(p); }
@@ -520,8 +543,8 @@ function onGamePacket(p) {
       invItems.push(_pendingQuickBind.item); _pendingQuickBind = null; refreshInv();
     } else cancelInvCursor();
   }
-  else if (p.name === "GC_ADD_NEW_ITEM_TO_ZONE" || p.name === "GC_ADD_ITEM_TO_ZONE") {                     // 地面掉落物(新掉/入世已有)
-    groundItems[p.objectID] = { x: p.x, y: p.y, itemType: p.itemType };
+  else if (p.name === "GC_ADD_NEW_ITEM_TO_ZONE" || p.name === "GC_ADD_ITEM_TO_ZONE" || p.name === "GC_DROP_ITEM_TO_ZONE") {  // 地面掉落物(新掉/入世已有/丢或解剖落地)
+    groundItems[p.objectID] = { x: p.x, y: p.y, itemType: p.itemType, itemClass: p.itemClass };   // 存 itemClass 供 firstFreeInvSlot 按 grid 尺寸找位
     const s = (invUI && invUI.itemPack) ? invUI.itemPack.get(p.itemType) : null;                          // 地面图标(官方 Item.inf), 缺则黄块
     renderer.addGroundItem(p.objectID, p.x, p.y, s);
   }
@@ -555,7 +578,7 @@ function onGamePacket(p) {
   else if (p.name === "GC_ATTACK_MELEE_OK_3") { renderer.otherAttack(p.objectID); }        // 旁观: 攻击者播攻击动画
   // 被击者新HP→血条+伤害飘字。服务端 broadcast 已排除被击者本人, 故只会是视野内的怪/他人(自身HP走 GC_MODIFY_INFORMATION)。
   else if (p.name === "GC_STATUS_CURRENT_HP") { renderer.setCreatureHP(p.objectID, p.curHP); }
-  else if (p.name === "GC_ADD_MONSTER_CORPSE") { renderer.killOther(p.objectID); }          // 怪死→播死亡动画+尸体停留(无die动作的怪直接移除); 掉落走 GC_ADD_ITEM_TO_ZONE
+  else if (p.name === "GC_ADD_MONSTER_CORPSE") { addCorpse(p); }   // 复刻开源 GCAddMonsterCorpseHandler: 地面新增尸体实体(掉落容器), 非"移除怪"
 }
 
 // ───── 注册 / 登录 / 建角色 流程 ─────
@@ -745,7 +768,20 @@ window.__dbg = { doLogin, selectAndEnter, getChars: () => lastChars, loadCreatur
   skillTest: (skills) => ensureSkillBar().setSkills(skills || [5, 6, 7, 8, 9, 154, 155].map((skillType, i) => ({ skillType, enable: true, interval: 2000 + i * 500, castingTime: i % 2 ? 800 : 0 }))),  // 验证用: 喂假技能列表测技能栏
   deathTest: () => death.showDeathScreen(),                                                      // 验证用: 显示死亡画面(不需真死)
   reviveTest: () => death.reviveCleanup(),                                                       // 验证用: 清死亡态
-  spawnTest: async () => { const pl = window.__player; if (!pl) return; await addOtherPlayer({ objectID: 99999, race: myRace, sex: mySex, x: pl.col + 1, y: pl.row, dir: 4, name: "测试目标", curHP: 30, maxHP: 50 }); } };  // 验证用: 注入带血条/名字的目标
+  spawnTest: async () => { const pl = window.__player; if (!pl) return; await addOtherPlayer({ objectID: 99999, race: myRace, sex: mySex, x: pl.col + 1, y: pl.row, dir: 4, name: "测试目标", curHP: 30, maxHP: 50 }); },  // 验证用: 注入带血条/名字的目标
+  addDudes: (n = 1) => { const pl = window.__player; if (pl) renderer.addDudes3D(pl.col + 2, pl.row, n); },  // 验证用: 玩家旁加 n 个 3D Dude
+  atkDebug: (on = true) => { renderer._dbgAtk = on; log("攻击诊断 " + (on ? "开" : "关") + ": 锁定怪后看 [atk] 日志(dist/oneShot/step/path/send)", "ok"); } };  // 真机诊断: 被围怪攻击状态点怪无法攻击时, 开此看 _tickCombat 卡在哪
+// 全面诊断只读快照(真机验证脚本用): 采集核心状态, 无副作用。
+window.__dbg.state = () => ({
+  race: myRace, sex: mySex, name: myCharName,
+  hp: hpmp.hp, hpMax: hpmp.hpMax, mp: hpmp.mp, mpMax: hpmp.mpMax,
+  level: hpmp.level, exp: hpmp.exp, gold: hpmp.gold, fame: hpmp.fame, bonus: hpmp.bonus,
+  str: hpmp.str, dex: hpmp.dex, int: hpmp.int,
+  invCount: invItems.length, gearCount: gearItems.length,
+  invItems: invItems.slice(0, 40), gearItems,
+  skills: window.__skillbar?.skills || null,
+  hudExists: !!hudBar, skillBarExists: !!skillBar, invUIExists: !!invUI, quickBarExists: !!quickBar,
+});
 // 渲染服务端角色列表: 每个角色一个按钮(可选), 有空槽再给「创建新角色」入口。
 function renderPCList(p) {
   const box = $("pclist"); box.style.display = "block";
@@ -765,6 +801,7 @@ function renderPCList(p) {
 }
 
 function onPacket(p) {
+  if (window.__pktLog) { window.__pktLog[p.name] = (window.__pktLog[p.name] || 0) + 1; }   // 诊断: 入世包统计
   if (p.name === "LC_LOGIN_OK") { log("◀ LC_LOGIN_OK → 取角色列表", "ok"); loginWS.send(encCLGetPCList()); }
   else if (p.name === "LC_LOGIN_ERROR") {
     log("◀ LC_LOGIN_ERROR 错误码=" + p.errorID, "err");

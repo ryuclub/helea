@@ -65,6 +65,7 @@ export const PACKET = {
   GC_ADD_GEAR_TO_INVENTORY: 177,  // 装备→背包(卸下确认): SlotID+InvenX+InvenY
   GC_ADD_ITEM_TO_ZONE: 182,       // 地面已有物品(入世下发): 同 187 结构
   GC_ADD_NEW_ITEM_TO_ZONE: 187,   // 地面新掉落: SHUFFLE_5(ObjID,X,Y,IClass,IType)+...
+  GC_DROP_ITEM_TO_ZONE: 236,      // 物品丢/解剖拖到地面: 同 187 结构 + 尾随 DropPetOID u32(解剖宝物落地走此包)
   GC_DELETE_AND_PICKUP_OK: 229,   // 拾取确认(给自己): ObjectID(移除地面物件)
   GC_CANNOT_ADD: 218,             // 操作失败: ObjectID(乐观更新回滚)
   // CG(客户端→服务端): ★4/7/8 明文不加密不shuffle; 3/10 加密无shuffle; 12 SHUFFLE_5; 13/137 SHUFFLE_3
@@ -75,6 +76,7 @@ export const PACKET = {
   CG_ADD_MOUSE_TO_ZONE: 10,       // 丢到地面: ObjectID (加密, ObjID^code)
   CG_ADD_ZONE_TO_INVENTORY: 12,   // 拾取→背包: ObjID+ZoneX+ZoneY+InvenX+InvenY (SHUFFLE_5)
   CG_ADD_ZONE_TO_MOUSE: 13,       // 拾取→光标: ObjID+ZoneX+ZoneY (SHUFFLE_3)
+  CG_DISSECTION_CORPSE: 28,       // 解剖尸体掉落: ObjID u32+X u8+Y u8+IsPet u8 (SHUFFLE_4)。服务端把宝物从尸体拖到地面→GCCreateItem广播地面物
   // ── NPC 交互 ──
   CG_NPC_TALK: 55,                // 点NPC对话(明文 ObjectID u32)
   GC_NPC_SAY_DYNAMIC: 298,        // NPC动态文本(服务端直发GBK中文): ObjID u32+szMsg u8+Message
@@ -317,6 +319,24 @@ export function encCGAddZoneToMouse({ objectID, zoneX, zoneY }) {
     if (m === 0) { A(); B(); C(); } else if (m === 1) { B(); C(); A(); } else { C(); A(); B(); }
   }
   return gframe(PACKET.CG_ADD_ZONE_TO_MOUSE, w.build());
+}
+
+// 解剖尸体 CGDissectionCorpse(28)。复刻开源 read: ObjectID u32, X(Coord_t=u8), Y u8, IsPet u8。SHUFFLE_4(与 CG_ATTACK 同构)。
+// 点尸体(ITEM_CLASS_CORPSE, treasureCount>0)→发此包; 服务端每次拖出一件宝物落到尸体所在地面格(GCCreateItem 广播)。
+export function encCGDissectionCorpse({ objectID, x, y, isPet = 0 }) {
+  const w = new Writer();
+  if (_code === 0) { w.u32(objectID >>> 0).u8(x).u8(y).u8(isPet); }
+  else {
+    const c = _code;
+    const oid = (objectID ^ c) >>> 0, X = x ^ c, Y = y ^ c, P = isPet ^ c;
+    const A = () => w.u32(oid), B = () => w.u8(X), C = () => w.u8(Y), D = () => w.u8(P);
+    const m = c % 4;
+    if (m === 0) { A(); B(); C(); D(); }
+    else if (m === 1) { B(); C(); D(); A(); }
+    else if (m === 2) { C(); D(); A(); B(); }
+    else { D(); A(); C(); B(); }
+  }
+  return gframe(PACKET.CG_DISSECTION_CORPSE, w.build());
 }
 
 // 喝药 CGUsePotionFromInventory(139)。SHUFFLE_3(A=ObjID u32, B=InvenX u8, C=InvenY u8) —— 与 CGAddZoneToMouse 同构。
@@ -709,7 +729,12 @@ export function decode(u8) {
     else if (id === PACKET.GC_ATTACK_MELEE_OK_2) { out.objectID = r.u32(); out.mods = readMods(r); }
     else if (id === PACKET.GC_ATTACK_MELEE_OK_3) { out.objectID = r.u32(); out.targetID = r.u32(); }                 // 旁观者: 攻击者→目标, 播攻击动画
     else if (id === PACKET.GC_STATUS_CURRENT_HP) { out.objectID = r.u32(); out.curHP = r.u16(); }                    // 被击者新HP→血条+伤害飘字
-    else if (id === PACKET.GC_ADD_MONSTER_CORPSE) { out.objectID = r.u32(); }                                        // 怪死→移除活体
+    // 怪死→地面新增尸体物(掉落容器)。GCAddMonsterCorpse::read: ObjID u32, MonsterType u16, name(u8len+bytes), X/Y u8(实测在线服务端坐标=BYTE, 非开源头声明的WORD; 包体size=24印证), Dir u8, hasHead u8, TreasureCount u8(掉落数), LastKiller u32。
+    else if (id === PACKET.GC_ADD_MONSTER_CORPSE) {
+      out.objectID = r.u32(); out.monsterType = r.u16();
+      const n = r.u8(); const mb = []; for (let i = 0; i < n; i++) mb.push(r.u8()); out.monsterName = gbkDecode(Uint8Array.from(mb));   // ★存 monsterName 不能覆盖 out.name(=包名 GC_ADD_MONSTER_CORPSE), 否则 main.js 按 p.name 分发失配, 尸体永不渲染
+      out.x = r.u8(); out.y = r.u8(); out.dir = r.u8(); out.hasHead = r.u8(); out.treasureCount = r.u8(); out.lastKiller = r.u32();
+    }
     // 入世/换区信息: 解析所在 ZoneID + 自身 HP/MP(三族)。失败 zoneID=null → 上层回退, 不送错 code。明文。
     else if (id === PACKET.GC_UPDATE_INFO) {
       try { const u = readUpdateInfoZone(r); if (u) Object.assign(out, u); else out.zoneID = null; }   // u 含 zone+HP/MP+level/exp/STR/DEX/INT
@@ -732,7 +757,7 @@ export function decode(u8) {
     // 地面新掉落 GCAddNewItemToZone(187): 前5字段 SHUFFLE_5(ObjID u32,X u8,Y u8,IClass u8,IType u16, 各^code),
     //   其余明文: optSize+opt, Silver u16, Grade i32, Durability u32, Ench i8, ItemNum u8, subCount+sub(9B)。
     //   ★字段序 Silver,Grade,Durability(≠PCItemInfo), 无 MainColor。
-    else if (id === PACKET.GC_ADD_NEW_ITEM_TO_ZONE || id === PACKET.GC_ADD_ITEM_TO_ZONE) {
+    else if (id === PACKET.GC_ADD_NEW_ITEM_TO_ZONE || id === PACKET.GC_ADD_ITEM_TO_ZONE || id === PACKET.GC_DROP_ITEM_TO_ZONE) {
       const c = _code;
       const rU32 = () => (c ? ((r.u32() ^ c) >>> 0) : r.u32());
       const rU16 = () => (c ? ((r.u16() ^ c) & 0xffff) : r.u16());
@@ -749,6 +774,7 @@ export function decode(u8) {
       const opt = r.u8(); out.options = []; for (let i = 0; i < opt; i++) out.options.push(r.u8());
       out.silver = r.u16(); out.grade = r.i32(); out.durability = r.u32(); out.enchant = (r.u8() << 24 >> 24); out.num = r.u8();
       const sub = r.u8(); out.sub = []; for (let i = 0; i < sub; i++) out.sub.push({ objectID: r.u32(), itemClass: r.u8(), itemType: r.u16(), num: r.u8(), slotID: r.u8() });
+      if (id === PACKET.GC_DROP_ITEM_TO_ZONE) out.dropPetOID = r.u32();   // 复刻开源 GCDropItemToZone = GCAddItemToZone + DropPetOID
     }
     // ── NPC 交互 ──
     // NPC 动态对话(服务端直发 GBK 中文): ObjectID + szMsg + Message。这是 M3 对话的主体, 不依赖 dpk。

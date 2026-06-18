@@ -339,10 +339,20 @@ void main(){
   // 出现/更新: GC_ADD_SLAYER 等。framesById/anim 与主角同一套(同为三族角色精灵)。
   addOther(objectID, framesById, col, row, dir, anim, info = null) {
     let e = this._others.get(objectID);
-    if (e) { e.col = col; e.row = row; e.dir = dir; e.stepping = false; if (info) Object.assign(e, info); this._renderAt(e, col, row); return e; }
+    if (e) { e.col = col; e.row = row; e.dir = dir; e.stepping = false; e.sx = 0; e.sy = 0; e.moveBuf = null; if (info) Object.assign(e, info); this._renderAt(e, col, row); return e; }
     e = this._makeSpriteEntity(framesById, col, row, anim, "oth" + objectID);
     e.dir = dir; e.objectID = objectID; if (info) Object.assign(e, info);   // {name, hp, maxHP, kind}
     this._others.set(objectID, e); this._renderAt(e, col, row);
+    return e;
+  }
+  // 怪死尸体(复刻开源 GCAddMonsterCorpseHandler): 创建尸体实体(die 末帧定格姿态, HP=0), 持久留地面, 可拾取(treasureCount)。
+  addCorpse(objectID, framesById, col, row, dir, anim, info) {
+    this.removeOther(objectID);                              // 清掉同 ID 的活怪/die 动画(避免冲突)
+    const e = this.addOther(objectID, framesById, col, row, dir, anim, { ...info, kind: "corpse", maxHP: 0 });
+    if (!e) return e;
+    const die = e.anim && e.anim.die;
+    if (die && die.some((d) => d && d.length)) { e.action = "die"; e.frameOverride = 9999; }   // die 末帧定格(尸体姿态)
+    this._renderAt(e, col, row);
     return e;
   }
   // 死亡: 播 die 动画(定格末帧)→短暂停留作"尸体"→移除。无 die 动作的怪直接移除。
@@ -372,6 +382,8 @@ void main(){
   setNetPickup(fn) { this._netPickup = fn; return this; }
   // 点击 NPC→对话的回调(index.html 设为发 CGNPCTalk)。
   setNetNPCTalk(fn) { this._netNPCTalk = fn; return this; }
+  // 点击尸体→解剖掉落的回调(发 CGDissectionCorpse)。(objectID, x, y)。
+  setNetDissect(fn) { this._netDissect = fn; return this; }
   // 地面掉落物(GCAddNewItemToZone): 在格子建一个可点击 plane。sprite={rgba,width,height}(官方 Item.inf 图标)
   //   则用真图标; 缺省发光黄块(降级为 3D 标记)。
   addGroundItem(objectID, col, row, sprite) {
@@ -440,22 +452,32 @@ void main(){
   // 每帧驱动其他玩家: 推进动画 + 步进插值 + 绘制(无相机跟随)。
   _updateOther(e, now, frameMs) {
     if (!e._lastNow) e._lastNow = now;
+    if (e.kind === "corpse") { this._renderAt(e, e.col, e.row); return; }   // 尸体: 定格 die 末帧, 不推进动画/不重置姿态
     if (e.dying) { this._updateDying(e, now); return; }    // 死亡序列优先
     e.animClock += now - e._lastNow; e._lastNow = now;
     while (e.animClock >= frameMs) { e.animClock -= frameMs; e.animIdx++; }
     if (e._atkUntil && now < e._atkUntil && e.anim.attack) {   // 攻击动画(临时)
       e.action = "attack"; this._renderAt(e, e.col, e.row);
-    } else if (e.stepping) {
+    } else if (e.stepping) {                                   // 步进中: 像素偏移 sx/sy 渐变到 0(视觉从旧格滑到新格)
       e.action = "move";
-      const p = Math.min(1, (now - e.t0) / e.stepMs);
-      const a = this._tileGTL(e.fromCol, e.fromRow), b = this._tileGTL(e.toCol, e.toRow);
-      const gx = a.x + (b.x - a.x) * p, gy = a.y + (b.y - a.y) * p;
-      this._drawFrame(e, gx, gy);
-      if (p >= 1) { e.col = e.toCol; e.row = e.toRow; e.stepping = false; }
+      this._advanceStep(e, now);
+      this._renderAt(e, e.col, e.row);
+    } else if (e.moveBuf && e.moveBuf.length) {                // 上一步走完 → 取队列下一步(复刻开源 AffectMoveBuffer, 衔接不跳变)
+      const m = e.moveBuf.shift(); e.dir = m.dir;
+      const odc = m.nc - e.col, odr = m.nr - e.row;
+      if (odc === 0 && odr === 0) { this._renderAt(e, e.col, e.row); }
+      else { e.col = m.nc; e.row = m.nr; e.sx = e.sx0 = -odc * TW; e.sy = e.sy0 = -odr * TH; e.stepDc = odc; e.stepDr = odr; e.stepping = true; e.stepT0 = now; e.action = "move"; this._renderAt(e, e.col, e.row); }
     } else {
       if (e.action !== "stand") e.action = "stand";
       this._renderAt(e, e.col, e.row);
     }
+  }
+  // 推进一步的像素偏移 sx/sy → 0(开源每帧 m_sX += m_cX 的时间驱动等价)。完成→返回 true。
+  _advanceStep(e, now) {
+    const p = Math.min(1, (now - e.stepT0) / STEP_MS);
+    e.sx = e.sx0 * (1 - p); e.sy = e.sy0 * (1 - p);
+    if (p >= 1) { e.sx = 0; e.sy = 0; e.stepping = false; return true; }
+    return false;
   }
 
   // 格子 → 全局瓦片左上像素(与窗口无关)
@@ -709,6 +731,12 @@ void main(){
       if (hit) {
         if (hit.e.kind === "monster" && this._netAttack) { this._atkTarget = hit.oid; this._tickCombat(performance.now()); return; }
         if (hit.e.kind === "npc" && this._netNPCTalk) { this._atkTarget = null; this._netNPCTalk(hit.oid); return; }
+        // 尸体: 解剖掉落(复刻开源 MPlayer ITEM_CLASS_CORPSE→CGDissectionCorpse, 仅 treasureCount>0 时发, 发后本地递减)
+        if (hit.e.kind === "corpse" && this._netDissect) {
+          this._atkTarget = null;
+          if ((hit.e.treasureCount | 0) > 0) { this._netDissect(hit.oid, hit.e.col, hit.e.row); hit.e.treasureCount = (hit.e.treasureCount | 0) - 1; }
+          return;
+        }
         // 他玩家: 暂无交互(PvP 后续), 落到下方移动
       }
       // 地面掉落物: 同样按精灵屏幕矩形命中
