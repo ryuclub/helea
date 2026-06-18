@@ -32,3 +32,8 @@ node_modules/
 # 项目通用工具配置(非 Helea 代码, 保持本地)
 .claude/
 DARKEDEN/
+
+# web 客户端 playwright 诊断/截图脚本(本地一次性, 不入库)
+web/client/diag_*.mjs
+web/client/shot_*.mjs
+web/client/verify_*.mjs
