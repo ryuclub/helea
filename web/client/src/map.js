@@ -105,7 +105,8 @@ export function parseImageObjects(buf, map) {
     const bAnim = dv.getUint8(p); p += 1;
     const bTrans = dv.getUint8(p); p += 1;
     if (type === 5 || type === 6 || type === 7) { p += 3; p += 5; p += 11; } // CAnimFrame + 5B + ShowTimeChecker
-    if (type === 7) p += 1; // interactionType
+    if (type === 7) p += 2; // m_InteractionObjectType = unsigned short(2字节)! 开源 MInteractionObject.cpp:74。
+    // ⚠ 曾误写 1 字节 → 地图里只要有一个 type7(传送/交互, 地牢常见)其后所有物件整体错位1字节 → 建筑层崩坏(地牢错乱真因)。
     const plen = dv.getUint16(p, true); p += 2;
     p += plen * 4;
     objs.push({ type, id, spriteID, pixelX, pixelY, viewpoint, bAnim, bTrans });

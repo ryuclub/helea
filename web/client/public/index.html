@@ -2,122 +2,75 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8" />
-<title>天之炼狱 Web 客户端 · Babylon 引擎</title>
+<title>天之炼狱 Web 客户端 · Babylon + 真实地形</title>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: #0c0c10; color: #ddd; font-family: system-ui, sans-serif; }
   body { display: flex; }
   #game { flex: 1; position: relative; }
-  #cv { width: 100%; height: 100vh; display: block; outline: none; }
-  #title { position: absolute; left: 14px; top: 12px; font-size: 14px; color: #cde;
-           background: rgba(0,0,0,.4); padding: 6px 10px; border-radius: 6px; }
+  #cv { width: 100%; height: 100vh; display: block; }
+  #uiScreen { position: absolute; inset: 0; z-index: 30; background: #000; overflow: hidden; }
+  /* 换区转场: 抓旧画面盖住(无黑屏)→ 加载久(>450ms)才浮出 spinner(表示在载入,非卡死)→ 新区就绪淡出露出新场景 */
+  #zoneFade { position: absolute; inset: 0; z-index: 25; display: none; background: #000 center/100% 100% no-repeat; opacity: 0; transition: opacity .45s ease; pointer-events: none; }
+  #zoneFade .veil { position: absolute; inset: 0; background: rgba(6,6,12,.5); opacity: 0; transition: opacity .35s ease; }
+  #zoneFade .spin { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; margin: -30px 0 0 -23px; border: 4px solid rgba(255,255,255,.16); border-top-color: #c33; border-radius: 50%; opacity: 0; transition: opacity .35s ease; animation: zspin .8s linear infinite; }
+  #zoneFade .tip { position: absolute; left: 0; right: 0; top: 50%; margin-top: 28px; text-align: center; color: #cbb; font-size: 13px; letter-spacing: 3px; opacity: 0; transition: opacity .35s ease; }
+  #zoneFade.busy .veil, #zoneFade.busy .spin, #zoneFade.busy .tip { opacity: 1; }
+  @keyframes zspin { to { transform: rotate(360deg); } }
+  #title { position: absolute; left: 14px; top: 12px; font-size: 14px; color: #cde; background: rgba(0,0,0,.45); padding: 6px 10px; border-radius: 6px; }
+  #toggleSide { position: absolute; right: 10px; top: 10px; z-index: 20; background: rgba(0,0,0,.6); color: #cde; font-weight: 600; padding: 7px 11px; }
+  #side.hidden { display: none; }
   #side { width: 320px; padding: 16px; overflow-y: auto; border-left: 1px solid #1c1c22; }
   h1 { font-size: 15px; margin: 0 0 4px; } .sub { font-size: 12px; color: #888; margin-bottom: 12px; }
   button { background: #2b6; color: #021; border: 0; padding: 8px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; }
   button:disabled { background: #444; color: #888; cursor: default; }
+  input.f { width: 100%; margin: 6px 0; padding: 7px 9px; background: #15151c; border: 1px solid #2a2a33; border-radius: 6px; color: #ddd; font-size: 13px; }
   #stat { margin: 12px 0; font-size: 12px; color: #9af; }
   #log { font: 12px/1.6 ui-monospace, monospace; }
   .l { padding: 2px 0; border-bottom: 1px solid #18181e; }
   .ok { color: #6e6; } .err { color: #e66; } .info { color: #9bf; }
+  /* 游戏内聊天 HUD(全屏后忠实开源: 底部输入框 + 左下消息) */
+  #chat { position: absolute; left: 14px; bottom: 14px; z-index: 20; width: 360px; max-width: 46vw; padding: 8px 11px; background: rgba(0,0,0,.45); border: 1px solid #3a3a44; border-radius: 6px; color: #fff; font-size: 13px; outline: none; opacity: .55; transition: opacity .15s; }
+  #chat:focus { opacity: 1; background: rgba(0,0,0,.78); border-color: #6a5a3a; }
+  #gameMsg { position: absolute; left: 14px; bottom: 56px; z-index: 19; width: 360px; max-width: 46vw; max-height: 32vh; overflow: hidden; display: flex; flex-direction: column-reverse; gap: 3px; pointer-events: none; font: 13px/1.45 system-ui; }
+  #gameMsg .m { padding: 2px 8px; background: rgba(0,0,0,.42); border-radius: 4px; width: fit-content; max-width: 100%; text-shadow: 0 1px 2px #000; }
+  #gameMsg .me { color: #bfe6ff; } #gameMsg .other { color: #ffe39a; } #gameMsg .sys { color: #9bf; }
 </style>
 </head>
 <body>
-<div id="game"><canvas id="cv"></canvas><div id="title">天之炼狱 · Babylon 引擎底座</div></div>
-<div id="side">
+<div id="game"><canvas id="cv"></canvas><div id="title">天之炼狱 · Adam 城(真实地形)</div><button id="toggleSide">☰ 调试</button>
+  <div id="zoneFade"><div class="veil"></div><div class="spin"></div><div class="tip">加载中…</div></div>
+  <div id="uiScreen"></div>
+  <div id="gameMsg"></div>
+  <input id="chat" placeholder="回车发送聊天" autocomplete="off" maxlength="64" />
+</div>
+<div id="side" class="hidden">
   <h1>天之炼狱 (DarkEden) · Web 客户端</h1>
-  <div class="sub">Babylon 正式引擎 + 真实登录流</div>
-  <button id="go">连接并登录 (111111)</button>
+  <div class="sub">Babylon 引擎 · 真实注册 / 建角色 / 登录流</div>
+  <!-- 登录已由开源 Login.spk 界面(覆盖层 #uiScreen)忠实接管; 旧侧栏表单保留隐藏作调试回退 -->
+  <div id="auth" style="display:none">
+    <input id="acc" class="f" placeholder="账号(4~10 位字母或数字)" autocomplete="off" />
+    <input id="pw" class="f" type="password" placeholder="密码(6~10 位)" autocomplete="off" />
+    <div style="display:flex;gap:8px;margin-top:4px">
+      <button id="go" style="flex:1">登录</button>
+      <button id="reg" style="flex:1;background:#46c;color:#fff">注册</button>
+    </div>
+  </div>
+  <div id="pclist" style="display:none">
+    <div class="sub" style="margin-top:10px;color:#8c8">选择角色(服务端角色列表)：</div>
+  </div>
+  <div id="create" style="display:none">
+    <div class="sub" style="margin-top:10px;color:#cc8">创建新角色：</div>
+    <input id="cname" class="f" placeholder="角色名(字母或数字)" autocomplete="off" />
+    <select id="crace" class="f"><option value="0">Slayer 屠夫</option><option value="1">Vampire 吸血鬼</option><option value="2">Ousters 魔灵</option></select>
+    <select id="csex" class="f"><option value="0">男</option><option value="1">女</option></select>
+    <button id="docreate" style="width:100%">创建角色并进入</button>
+  </div>
   <div id="stat"></div>
   <div id="log"></div>
 </div>
 
 <script src="/public/vendor/babylon.js"></script>
-<script type="module">
-import { GameRenderer } from "../src/render.js";
-import { decodePack, decodeCIndexSprite } from "../src/spk.js";
-import { encCLLogin, encCLGetPCList, encCLSelectPC, encCGConnect, decode, Framer } from "../src/proto.js";
-
-const logEl = document.getElementById("log"), statEl = document.getElementById("stat");
-const log = (m, c = "") => { const d = document.createElement("div"); d.className = "l " + c; d.textContent = m; logEl.prepend(d); };
-
-// 账号 111111 Slayer SLOT1 角色名(DB 原始字节)
-const PC_NAME = Uint8Array.from("B2BBD4D9D1DACACE".match(/../g).map((h) => parseInt(h, 16)));
-
-// ---- 引擎底座 ----
-const renderer = new GameRenderer(document.getElementById("cv")).buildScene().addGround(6, 6).start();
-window.__renderer = renderer;
-
-// 预解码角色帧(P3)
-let heroFrames = null;
-(async () => {
-  try {
-    const buf = new Uint8Array(await (await fetch("/public/assets/slayerman00.ispk")).arrayBuffer());
-    heroFrames = decodePack(buf, decodeCIndexSprite, 12);
-    log(`角色资源就绪: ${heroFrames.length} 帧`, "info");
-  } catch (e) { log("角色资源失败: " + e.message, "err"); }
-})();
-
-let player = null;
-function spawnPlayer() {
-  if (player || !heroFrames) return;
-  player = renderer.spawn({ id: "player", col: 2, row: 3 }).setBillboard(heroFrames, { dirCount: 3, framesPerDir: 4 });
-  window.__player = player;
-  log("角色已进入场景(2D billboard)", "ok");
-}
-
-// ---- 真实登录流 ----
-document.getElementById("go").onclick = () => {
-  document.getElementById("go").disabled = true;
-  log("连接网关 ws://127.0.0.1:8080 …", "info");
-  const ws = new WebSocket("ws://127.0.0.1:8080/?host=127.0.0.1&port=9999");
-  ws.binaryType = "arraybuffer";
-  const framer = new Framer((pkt) => onPacket(decode(pkt), ws));
-  ws.onmessage = (e) => framer.push(new Uint8Array(e.data));
-  ws.onopen = () => { log("已连接 → CL_LOGIN", "ok"); ws.send(encCLLogin({ id: "111111", password: "111111" })); };
-  ws.onerror = () => log("连接错误(网关/服务端在跑?)", "err");
-  ws.onclose = () => log("连接关闭", "info");
-};
-
-function onPacket(p, ws) {
-  if (p.name === "LC_LOGIN_OK") { log(`◀ LC_LOGIN_OK → 请求角色列表`, "ok"); ws.send(encCLGetPCList()); }
-  else if (p.name === "LC_LOGIN_ERROR") { log(`◀ LC_LOGIN_ERROR code=${p.errorID}`, "err"); }
-  else if (p.name === "LC_PC_LIST") { log(`◀ LC_PC_LIST(${p.size}B) → 选 Slayer`, "ok"); ws.send(encCLSelectPC({ pcName: PC_NAME, pcType: 0 })); }
-  else if (p.name === "LC_RECONNECT") {
-    log(`◀ LC_RECONNECT → 移交游戏服 ${p.gameServerIP}:${p.gameServerPort}`, "ok");
-    statEl.innerHTML = `已移交游戏服 ${p.gameServerIP}:${p.gameServerPort}<br>连接 gameserver…`;
-    ws.close(); // loginserver 任务完成
-    connectGame(p);
-  } else { log(`◀ ${p.name}(${p.size}B)`, ""); }
-}
-
-// ---- 第二段: 连 gameserver, CG_CONNECT 入世 ----
-function connectGame(rc) {
-  const port = rc.gameServerPort || 9998;
-  log(`连接 gameserver(网关→${port}) …`, "info");
-  const gws = new WebSocket(`ws://127.0.0.1:8080/?host=127.0.0.1&port=${port}`);
-  gws.binaryType = "arraybuffer";
-  const framer = new Framer((pkt) => onGamePacket(decode(pkt)));
-  gws.onmessage = (e) => framer.push(new Uint8Array(e.data));
-  gws.onopen = () => {
-    log("gameserver 已连 → CG_CONNECT(携带 key)", "ok");
-    gws.send(encCGConnect({ key: rc.key, pcName: PC_NAME, pcType: 0 }));
-  };
-  gws.onerror = () => log("gameserver 连接错误", "err");
-  window.__gws = gws;
-}
-
-function onGamePacket(p) {
-  if (p.name === "GC_UPDATE_INFO") {
-    log(`◀ GC_UPDATE_INFO(${p.size}B) —— 服务端下发角色数据`, "ok");
-    statEl.innerHTML = `✅ 已真正进入游戏世界<br>gameserver 已确认 · 角色: Slayer`;
-    spawnPlayer();
-    window.__entered = true;
-  } else if (p.name === "GC_DISCONNECT") {
-    log(`◀ GC_DISCONNECT —— 被游戏服拒绝`, "err");
-  } else {
-    log(`◀ ${p.name}(${p.size}B)`, "");
-  }
-}
-</script>
+<script type="module" src="../src/main.js"></script>
 </body>
 </html>
