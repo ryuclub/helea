@@ -64,9 +64,13 @@ function realImageName(lower) {
 }
 
 // 通过 docker exec 跑 mysql。id/password 已严格限定 [A-Za-z0-9], 无注入风险。
+// 凭证从环境变量读；默认值仅对应本地 docker-compose 起的开发库，生产务必覆盖。
+const MYSQL_CONTAINER = process.env.MYSQL_CONTAINER || "odk-mysql";
+const MYSQL_USER = process.env.MYSQL_USER || "root";
+const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || "devpass";
 function mysql(sql) {
   return new Promise((resolve, reject) => {
-    execFile("docker", ["exec", "odk-mysql", "mysql", "-uroot", "-p123456", "-N", "-e", sql],
+    execFile("docker", ["exec", MYSQL_CONTAINER, "mysql", `-u${MYSQL_USER}`, `-p${MYSQL_PASSWORD}`, "-N", "-e", sql],
       { timeout: 8000 }, (err, stdout, stderr) => {
         if (err) reject(new Error((stderr || err.message).trim())); else resolve(stdout.trim());
       });
